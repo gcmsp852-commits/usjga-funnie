@@ -86,7 +86,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader18</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2667,9 +2667,10 @@
             } catch (e) {
                 resList = null;
             }
+            const normalList = resList ? (Array.isArray(resList) ? resList : [resList]) : [];
+            const hasNormalDecoded = normalList.some(res => res && res.data && !res.isRaw);
             if (scanStage === 1 || scanMode === 'normal' || scanMode === 'digital_sign') {
-                storeStage1SecondQrCandidates(resList, offsetX, offsetY);
-                if (!hasSecondQrCandidate() && !(opts && opts.appEncMask)) {
+                if (!hasNormalDecoded && !hasSecondQrCandidate() && !(opts && opts.appEncMask)) {
                     try {
                         const pmOpts = Object.assign({}, normalOpts, {
                             sysEncDecode: true,
@@ -2677,6 +2678,10 @@
                         });
                         const pmFlipList = jsQR(input, width, height, pmOpts);
                         storeStage1SecondQrCandidates(pmFlipList, offsetX, offsetY);
+                        const pmList = pmFlipList ? (Array.isArray(pmFlipList) ? pmFlipList : [pmFlipList]) : [];
+                        if (pmList.some(res => res && res.data && !res.isRaw)) {
+                            resList = pmFlipList;
+                        }
                     } catch (e) { /* ignore PM-flip provisional decode error */ }
                 }
             }
@@ -5805,7 +5810,7 @@
                     }
 
                     // --- [フェーズ 1 / ネイティブ優先] Hybrid (BarcodeDetector Crop + jsQR) ---
-                    if (false && detectedItems.length === 0 && useNativeDetector) {
+                    if (detectedItems.length === 0 && useNativeDetector) {
                         setScanPhaseStatus('フェーズ1: BarcodeDetectorクロップ + jsQR');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
@@ -5840,7 +5845,7 @@
                                     const b = barcodes[i];
 
                                     const bbox = b.boundingBox;
-                                    const PADDING = Math.max(50, Math.floor(bbox.width * 0.5));
+                                    const PADDING = 50;
                                     const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
                                     const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
                                     const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
@@ -5882,9 +5887,11 @@
                                                         { x: res.location.bottomLeftCorner.x + sx, y: res.location.bottomLeftCorner.y + sy }
                                                     ]
                                                 });
+                                                break;
                                             }
                                         }
                                     }
+                                    if (detectedItems.length > 0 || (scanStage === 1 && hasSecondQrCandidate())) break;
                                 }
                             }
                         } catch(err) { /* ignore Native Error */ }
@@ -6084,7 +6091,7 @@
 
                     // --- [フェーズ 2.5] Stage 1位置再利用 + jsQRクロップ復号 (二重暗号化などBarcodeDetector失敗時用) ---
                     // Stage 1で既にツインの座標を取得しているため、その周辺だけを探すことでフルスクリーンを回避する
-                    if (false && detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
+                    if (detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
                         setScanPhaseStatus('フェーズ2.5: lastTwinBBoxクロップ');
                         const bbox = lastTwinBBox;
                         // ★ アスペクト比を見てパディングを切替える
@@ -6092,12 +6099,7 @@
                         //     第2QR が含まれるよう **大きく**（短辺の 1.2 倍）パディング
                         //   ・bbox が細長い           → 既にツイン全体を覆う UNION なので
                         //     カメラ揺れを吸収する分だけ **控えめに**（短辺の 0.4 倍）パディング
-                        const _w = bbox.width, _h = bbox.height;
-                        const _minDim = Math.min(_w, _h);
-                        const _aspect = Math.max(_w, _h) / Math.max(1, _minDim);
-                        const PADDING = (_aspect >= 1.5)
-                            ? Math.max(80,  Math.floor(_minDim * 0.4))
-                            : Math.max(120, Math.floor(_minDim * 1.2));
+                        const PADDING = 80;
                         const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
                         const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
                         const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
@@ -6146,6 +6148,7 @@
                                                 { x: cropRes.location.bottomLeftCorner.x + sx, y: cropRes.location.bottomLeftCorner.y + sy }
                                             ]
                                         });
+                                        break;
                                     }
                                 }
                             }
@@ -6380,8 +6383,8 @@
                     }
 
                     // --- [フェーズ 3 / Fallback] Custom jsQR Full-Screen Scan ---
-                    if (true) {
-                        setScanPhaseStatus('フェーズ3: 全画面jsQRのみ');
+                    if (detectedItems.length === 0 && !(scanStage === 1 && hasSecondQrCandidate())) {
+                        setScanPhaseStatus('フェーズ3: 全画面jsQR');
                         zxingCanvas.width = overlayCanvas.width;
                         zxingCanvas.height = overlayCanvas.height;
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
@@ -6438,6 +6441,7 @@
                                             resFull.location.bottomLeftCorner
                                         ]
                                     });
+                                    if (scanStage === 1) break;
                                 }
                             }
                         }
@@ -6449,12 +6453,17 @@
                     }
 
                     // --- 結果処理ループ ---
-                    if ((scanMode === 'normal' || scanMode === 'digital_sign') && scanStage === 1) {
-                        for (const item of detectedItems) {
-                            collectUnifiedDetectedItem(item);
-                        }
+                    if (scanStage === 3 && firstQR && hasSecondQrCandidate()) {
                         const finalized = await tryFinalizeUnifiedQrTwin();
                         if (finalized) return;
+                    }
+
+                    if (scanStage === 1 && detectedItems.length === 0 && hasSecondQrCandidate()) {
+                        if (!secondQR && provisionalSecondQR) {
+                            secondQR = provisionalSecondQR;
+                        }
+                        scanStage = 3;
+                        statusText.innerText = "第1QRを探索中...";
                         isProcessing = false;
                         if (isScanning) requestAnimationFrame(scanLoop);
                         return;
@@ -6595,6 +6604,36 @@
                             }
 
                             // 2) デジタル署名ではない通常のStage 1処理（第1QRのみ受け入れ）
+                            if (qrNo === 1) {
+                                secondQR = {
+                                    text: resultData,
+                                    data: resultData,
+                                    managementCode: resultMgmt,
+                                    managementCode32: item.managementCode32,
+                                    managementFlags16: item.managementFlags16,
+                                    creationDateTimeExt32: item.creationDateTimeExt32,
+                                    managementExt32: item.managementExt32,
+                                    expiryExt32: item.expiryExt32,
+                                    readerIdExt32: item.readerIdExt32,
+                                    readLimitBits: item.readLimitBits,
+                                    qrTwinUniqueId8: item.qrTwinUniqueId8,
+                                    locationLatExt24: item.locationLatExt24,
+                                    locationLonExt24: item.locationLonExt24,
+                                    municipalityExt24: item.municipalityExt24,
+                                    codewords: item.codewords,
+                                    dataBytes: item.dataBytes,
+                                    versionNumber: item.versionNumber,
+                                    points: resultPts,
+                                    center: resultPts ? computeCenterFromPoints(resultPts) : null
+                                };
+                                provisionalSecondQR = secondQR;
+                                scanStage = 3;
+                                statusText.innerText = "第1QRを探索中...";
+                                isProcessing = false;
+                                if (isScanning) requestAnimationFrame(scanLoop);
+                                return;
+                            }
+
                             if (qrNo !== 0) continue;
 
                             firstQR = {
@@ -6680,7 +6719,7 @@
                                     statusText.innerText = "第2QR（システム暗号化）を探索中...";
                                     // ★ 第2QR即時プリロケート：第1QR検出と同フレームで第2QRを検索
                                     //   ── 4–5秒問題の主因（Stage3 ループに入る前に同フレームで決着）
-                                    const _q2Pre = preLocateQ2SysEncLegacy({ sysEncDecode: true });
+                                    const _q2Pre = null;
                                     if (_q2Pre) {
                                         secondQR = _q2Pre;
                                         isScanning = false;
@@ -6705,13 +6744,8 @@
                                     //     （UIスレッド占有を防ぐため）。scanLoop の通常リズム
                                     //     （SCAN_INTERVAL_MS = 40ms + rAF）で安全に再試行される。
                                     capturePendingAppEncFrame();
-                                    savedQ2AppEncData = preLocateQ2InCurrentFrame({
-                                        sysEncDecode: true,
-                                        captureAppEncDataBytes: true,
-                                        acceptRawAppEncData: true,
-                                        firstQrPoints: getFirstQrGeometryForQ2(),
-                                        firstQrVersionNumber: firstQR && firstQR.versionNumber
-                                    });
+                                    scanStage = 3;
+                                    savedQ2AppEncData = null;
                                     if (savedQ2AppEncData) {
                                         // RS訂正成功 → 読取仮成功 → パスワード画面へ遷移
                                         isProcessing = false;
@@ -6873,6 +6907,16 @@
                             //   「qrNo===1 OR 中心距離 > min(画面幅×0.1, qrSize×0.45)」へ強化。
                             //   これにより、システム暗号化／ユーザ暗号化で mgmt 一部破損やテキスト揺らぎが
                             //   起きても、空間的に別位置の QR を確実に第2QRと判定して取りこぼさない。
+                            if (!firstQR && qrNo === 0) {
+                                firstQR = makeQrFromDetectedItem(item);
+                                if (firstQR && firstQR.points && firstQR.points.length === 4) {
+                                    preserveFirstQrGeometryForQ2();
+                                }
+                                const finalized = await tryFinalizeUnifiedQrTwin();
+                                if (finalized) return;
+                                continue;
+                            }
+
                             const candCenter = computeCenterFromPoints(resultPts);
                             const candAdapter2 = { text: resultData, points: resultPts, center: candCenter };
                             ensureFirstCenter(firstQR);
