@@ -86,7 +86,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader7</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -5725,7 +5725,7 @@
                     // 暗号化済み QR のデータを正しく復号できないが「位置検出」自体は通常QRと同様に高速に行える。
                     // → BarcodeDetector でクロップ位置を取得し、その小領域に対してのみ jsQR(sysEncDecode) を呼ぶ。
                     // 全画面 jsQR よりも数倍〜十倍程度高速化される（縦持ち/横持ち問わず効果大）。
-                    if (barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
+                    if (false && barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
                         setScanPhaseStatus('フェーズ1.0: BarcodeDetector位置検出 + PM反転復号');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
@@ -5805,7 +5805,7 @@
                     }
 
                     // --- [フェーズ 1 / ネイティブ優先] Hybrid (BarcodeDetector Crop + jsQR) ---
-                    if (detectedItems.length === 0 && useNativeDetector) {
+                    if (false && detectedItems.length === 0 && useNativeDetector) {
                         setScanPhaseStatus('フェーズ1: BarcodeDetectorクロップ + jsQR');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
@@ -5933,7 +5933,7 @@
                     //
                     // 1フレームあたり 1 スケールだけを試行し、フレーム毎に巡回するので
                     // 検出ループの高速性は保ちつつ、複数サイズの QR を均等にカバーできる。
-                    if (detectedItems.length === 0 && useNativeDetector && barcodeDetector) {
+                    if (false && detectedItems.length === 0 && useNativeDetector && barcodeDetector) {
                         setScanPhaseStatus('フェーズ1.5: 中央クロップ + BarcodeDetector');
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
@@ -6021,7 +6021,7 @@
                     // --- [フェーズ 2] BarcodeDetector位置検出 + jsQRクロップ復号 (appMask専用ハイブリッド) ---
                     // appMask設定時: BarcodeDetectorでQRの位置だけ検出→クロップ→jsQRで暗号復号
                     // BarcodeDetector自身は暗号化QRを復号できないが、位置検出は高速に行える
-                    if (detectedItems.length === 0 && barcodeDetector && scanStage === 3 && appMask) {
+                    if (false && detectedItems.length === 0 && barcodeDetector && scanStage === 3 && appMask) {
                         setScanPhaseStatus('フェーズ2: appMask用BarcodeDetectorクロップ');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
@@ -6084,7 +6084,7 @@
 
                     // --- [フェーズ 2.5] Stage 1位置再利用 + jsQRクロップ復号 (二重暗号化などBarcodeDetector失敗時用) ---
                     // Stage 1で既にツインの座標を取得しているため、その周辺だけを探すことでフルスクリーンを回避する
-                    if (detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
+                    if (false && detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
                         setScanPhaseStatus('フェーズ2.5: lastTwinBBoxクロップ');
                         const bbox = lastTwinBBox;
                         // ★ アスペクト比を見てパディングを切替える
@@ -6380,8 +6380,8 @@
                     }
 
                     // --- [フェーズ 3 / Fallback] Custom jsQR Full-Screen Scan ---
-                    if (detectedItems.length === 0) {
-                        setScanPhaseStatus('フェーズ3: 最後に全画面jsQR');
+                    if (true) {
+                        setScanPhaseStatus('フェーズ3: 全画面jsQRのみ');
                         zxingCanvas.width = overlayCanvas.width;
                         zxingCanvas.height = overlayCanvas.height;
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
