@@ -86,7 +86,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader1</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -347,6 +347,7 @@
         let savedQ2AppEncData = null;
         let provisionalSecondQR = null;
         let provisionalSecondRawQR = null;
+        let firstQRChecksPassed = false;
 
         // ★ 端末情報登録システム
         let currentTerminalHashes = [];
@@ -2383,12 +2384,20 @@
         function resetProvisionalSecondQR() {
             provisionalSecondQR = null;
             provisionalSecondRawQR = null;
+            firstQRChecksPassed = false;
         }
 
         function getScanStageDisplayName() {
             if (scanStage === 1) return 'Stage1: 第1QR・第2QR同時探索';
             if (scanStage === 2) return 'Stage2: 入力待ち';
             if (scanStage === 3) return 'Stage3: 第2QR探索';
+            return 'Stage0: 待機';
+        }
+
+        function getScanStageDisplayName() {
+            if (scanStage === 1) return 'QRツイン探索中';
+            if (scanStage === 2) return 'Stage2: パスワード入力待ち';
+            if (scanStage === 3) return 'Stage3: パスワード復号中';
             return 'Stage0: 待機';
         }
 
@@ -2464,6 +2473,214 @@
             for (const res of list) {
                 storeStage1SecondQrCandidate(res, offsetX, offsetY);
             }
+        }
+
+        function hasSecondQrCandidate() {
+            return !!(secondQR || provisionalSecondQR || provisionalSecondRawQR);
+        }
+
+        function makeQrFromDetectedItem(item) {
+            if (!item) return null;
+            const pts = item.points || null;
+            return {
+                text: item.data || item.text || null,
+                data: item.data || item.text || null,
+                managementCode: item.managementCode,
+                managementCode32: item.managementCode32,
+                managementFlags16: item.managementFlags16,
+                creationDateTimeExt32: item.creationDateTimeExt32,
+                managementExt32: item.managementExt32,
+                expiryExt32: item.expiryExt32,
+                readerIdExt32: item.readerIdExt32,
+                readLimitBits: item.readLimitBits,
+                qrTwinUniqueId8: item.qrTwinUniqueId8,
+                locationLatExt24: item.locationLatExt24,
+                locationLonExt24: item.locationLonExt24,
+                municipalityExt24: item.municipalityExt24,
+                codewords: item.codewords,
+                dataBytes: item.dataBytes,
+                versionNumber: item.versionNumber,
+                points: pts,
+                center: pts ? computeCenterFromPoints(pts) : item.center
+            };
+        }
+
+        function collectUnifiedDetectedItem(item) {
+            if (!item || !item.data) return;
+            const mgmtCode32 = item.managementCode32 !== undefined && item.managementCode32 !== null
+                ? (item.managementCode32 >>> 0)
+                : getManagementCode32FromParts(item.managementCode, item.managementFlags16);
+            const mgmtInfo = parseStandardMgmt(mgmtCode32);
+            if (!mgmtInfo) return;
+
+            const qr = makeQrFromDetectedItem(item);
+            if (!qr) return;
+
+            if (mgmtInfo.qrNo === 0 && !firstQR) {
+                firstQR = qr;
+                if (firstQR.points && firstQR.points.length === 4) {
+                    preserveFirstQrGeometryForQ2();
+                }
+            } else if (mgmtInfo.qrNo === 1 && !secondQR) {
+                secondQR = qr;
+                provisionalSecondQR = qr;
+            }
+        }
+
+        async function validateFirstQRConditionsOnce() {
+            if (!firstQR || firstQRChecksPassed) return true;
+            if (firstQR.expiryExt32 !== undefined && !checkExpiry(firstQR.expiryExt32)) {
+                isScanning = false; isProcessing = false;
+                showResultScreen(null, "読み取りの有効期限が終了しました");
+                return false;
+            }
+            if (firstQR.readerIdExt32 !== undefined && !matchesRegisteredTerminalId(firstQR.readerIdExt32)) {
+                isScanning = false; isProcessing = false;
+                showResultScreen(null, "読取端末IDが一致しません");
+                return false;
+            }
+            if (firstQR.locationLatExt24 !== undefined && firstQR.locationLonExt24 !== undefined) {
+                const locMatch = await checkLocation(firstQR.locationLatExt24, firstQR.locationLonExt24);
+                if (!locMatch) {
+                    isScanning = false; isProcessing = false;
+                    showResultScreen(null, "読取位置が一致しません");
+                    return false;
+                }
+            }
+            if (firstQR.municipalityExt24 !== undefined) {
+                const muniMatch = await checkMunicipality(firstQR.municipalityExt24);
+                if (!muniMatch) {
+                    isScanning = false; isProcessing = false;
+                    showResultScreen(null, "市町村コードが一致しません");
+                    return false;
+                }
+            }
+            if (!ensureReadCountAllowed(firstQR)) {
+                isScanning = false; isProcessing = false;
+                return false;
+            }
+            firstQRChecksPassed = true;
+            return true;
+        }
+
+        function getFirstQRMgmtInfo() {
+            if (!firstQR) return null;
+            const mgmtCode32 = firstQR.managementCode32 !== undefined && firstQR.managementCode32 !== null
+                ? (firstQR.managementCode32 >>> 0)
+                : getManagementCode32FromParts(firstQR.managementCode, firstQR.managementFlags16);
+            return parseStandardMgmt(mgmtCode32);
+        }
+
+        function finalizeDigitalSignaturePair() {
+            isScanning = false;
+            isProcessing = false;
+            statusText.innerText = "電子署名を検証中...";
+            let signBytes;
+            try {
+                const binaryStr = atob(secondQR.text);
+                if (binaryStr.length !== 42) throw new Error("Invalid signature length");
+                signBytes = new Uint8Array(42);
+                for (let i = 0; i < 42; i++) signBytes[i] = binaryStr.charCodeAt(i);
+            } catch(e) {
+                showResultScreen({ verified: false, senderName: "不明", imageDataId: 0, hasImageDataId: false });
+                return true;
+            }
+
+            const keyId = (signBytes[0] << 8) | signBytes[1];
+            const sigR = signBytes.slice(2, 22);
+            const sigS = signBytes.slice(22, 42);
+            const imageDataId = firstQR.managementExt32 || 0;
+            const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
+
+            try {
+                const pubKeyCacheHex = ECDSA_PUBLIC_KEYS[keyId];
+                let verified = false;
+                let senderName = "不明";
+                const codewordsArray = firstQR.codewords;
+                const hashInput = new Uint8Array(codewordsArray);
+                if (pubKeyCacheHex) {
+                    senderName = ECDSA_SENDER_NAMES[keyId] || `ID:${keyId}`;
+                    verified = ecdsaVerify(hashInput, sigR, sigS, pubKeyCacheHex);
+                }
+                showResultScreen({ verified: verified, senderName: senderName, imageDataId: imageDataId, hasImageDataId: hasImageDataId });
+            } catch (err) {
+                console.error("Verification failed", err);
+                showResultScreen({ verified: false, senderName: "エラー", imageDataId: 0, hasImageDataId: false });
+            }
+            return true;
+        }
+
+        async function tryFinalizeUnifiedQrTwin() {
+            if (!firstQR) return false;
+            const firstMgmtInfo = getFirstQRMgmtInfo();
+            if (!firstMgmtInfo) return false;
+            const checksOk = await validateFirstQRConditionsOnce();
+            if (!checksOk) return true;
+
+            if (firstMgmtInfo.sameDataFlag) {
+                secondQR = secondQR || {
+                    text: firstQR.text,
+                    data: firstQR.data || firstQR.text,
+                    managementCode: firstQR.managementCode,
+                    managementCode32: firstQR.managementCode32,
+                    managementFlags16: firstQR.managementFlags16,
+                    points: firstQR.points,
+                    center: firstQR.center
+                };
+            }
+
+            if (!secondQR && provisionalSecondQR) {
+                secondQR = provisionalSecondQR;
+            }
+
+            if (scanMode === 'digital_sign' && firstQR && secondQR) {
+                return finalizeDigitalSignaturePair();
+            }
+
+            if (firstMgmtInfo.appEncFlag && !secondQR && provisionalSecondRawQR) {
+                savedQ2AppEncData = provisionalSecondRawQR;
+                provisionalSecondRawQR = null;
+                isProcessing = false;
+                showPasswordScreen();
+                return true;
+            }
+
+            if (secondQR) {
+                resetProvisionalSecondQR();
+                isScanning = false;
+                isProcessing = false;
+                showResultScreen();
+                return true;
+            }
+
+            return false;
+        }
+
+        function decodeAndCollectQrCrop(input, width, height, offsetX = 0, offsetY = 0, opts = {}) {
+            const normalOpts = Object.assign({
+                inversionAttempts: "attemptBoth",
+                multi: true
+            }, opts || {});
+            let resList = null;
+            try {
+                resList = jsQR(input, width, height, normalOpts);
+            } catch (e) {
+                resList = null;
+            }
+            if (scanStage === 1 || scanMode === 'normal' || scanMode === 'digital_sign') {
+                storeStage1SecondQrCandidates(resList, offsetX, offsetY);
+                if (!hasSecondQrCandidate() && !(opts && opts.appEncMask)) {
+                    try {
+                        const pmOpts = Object.assign({}, normalOpts, {
+                            sysEncDecode: true,
+                            captureAppEncDataBytes: true
+                        });
+                        const pmFlipList = jsQR(input, width, height, pmOpts);
+                        storeStage1SecondQrCandidates(pmFlipList, offsetX, offsetY);
+                    } catch (e) { /* ignore PM-flip provisional decode error */ }
+                }
+            }
+            return resList;
         }
 
         function finishAppEncFromFrame(frame, useSauvola) {
@@ -5399,7 +5616,7 @@
                             scanMode === 'normal'
                             || (scanMode === 'digital_sign' && digitalSignStage3 && !secondQR)
                         );
-                    if (canUseQ2GeometryCrop) {
+                    if (false && canUseQ2GeometryCrop) {
                         setScanPhaseStatus('フェーズ0.5: 幾何クロップ');
                         const _q2box = estimateQ2BBoxFromQ1(q2SeedPointsForGeometry, firstQR.versionNumber);
                         if (_q2box) {
@@ -5634,19 +5851,10 @@
                                     zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                                     const imgData = zxingCtx.getImageData(0, 0, sw, sh);
 
-                                    const resList = jsQR(imgData.data, sw, sh, { inversionAttempts: "attemptBoth", multi: true });
-                                    if (scanStage === 1) {
-                                        storeStage1SecondQrCandidates(resList, sx, sy);
-                                        try {
-                                            const pmFlipList = jsQR(imgData.data, sw, sh, {
-                                                inversionAttempts: "attemptBoth",
-                                                multi: true,
-                                                sysEncDecode: true,
-                                                captureAppEncDataBytes: true
-                                            });
-                                            storeStage1SecondQrCandidates(pmFlipList, sx, sy);
-                                        } catch (e) { /* ignore PM-flip provisional decode error */ }
-                                    }
+                                    const resList = decodeAndCollectQrCrop(imgData.data, sw, sh, sx, sy, {
+                                        inversionAttempts: "attemptBoth",
+                                        multi: true
+                                    });
                                     if (resList && resList.length > 0) {
                                         for (const res of resList) {
                                             if (res && res.data && !res.isRaw) {
@@ -5773,7 +5981,7 @@
                                         }
                                         if (needSysEncForStage1) cropOpts.sysEncDecode = true;
 
-                                        const resList = jsQR(imgData.data, dsw, dsh, cropOpts);
+                                        const resList = decodeAndCollectQrCrop(imgData.data, dsw, dsh, dsx, dsy, cropOpts);
                                         if (resList && resList.length > 0) {
                                             for (const res of resList) {
                                                 if (res && res.data && !res.isRaw) {
@@ -5832,7 +6040,7 @@
                                     zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                                     const imgData = zxingCtx.getImageData(0, 0, sw, sh);
 
-                                    const cropResList = jsQR(imgData.data, sw, sh, {
+                                    const cropResList = decodeAndCollectQrCrop(imgData.data, sw, sh, sx, sy, {
                                         inversionAttempts: "attemptBoth",
                                         appEncMask: Array.from(appMask),
                                         sysEncDecode: true,
@@ -5911,7 +6119,7 @@
                             } else if (digitalSignStage3 || sysEncStage3) {
                                 cropOpts.sysEncDecode = true;
                             }
-                            const cropResList = jsQR(imgData.data, sw, sh, cropOpts);
+                            const cropResList = decodeAndCollectQrCrop(imgData.data, sw, sh, sx, sy, cropOpts);
 
                             if (cropResList && cropResList.length > 0) {
                                 for (const cropRes of cropResList) {
@@ -6198,7 +6406,7 @@
                             opts.sysEncDecode = true;
                         }
 
-                        let resFullList = jsQR(fullData.data, fullData.width, fullData.height, opts);
+                        let resFullList = decodeAndCollectQrCrop(fullData.data, fullData.width, fullData.height, 0, 0, opts);
                         if (resFullList && !Array.isArray(resFullList)) resFullList = [resFullList];
 
                         if (resFullList && resFullList.length > 0) {
@@ -6241,6 +6449,17 @@
                     }
 
                     // --- 結果処理ループ ---
+                    if ((scanMode === 'normal' || scanMode === 'digital_sign') && scanStage === 1) {
+                        for (const item of detectedItems) {
+                            collectUnifiedDetectedItem(item);
+                        }
+                        const finalized = await tryFinalizeUnifiedQrTwin();
+                        if (finalized) return;
+                        isProcessing = false;
+                        if (isScanning) requestAnimationFrame(scanLoop);
+                        return;
+                    }
+
                     for (let item of detectedItems) {
                         const { data: resultData, managementCode: resultMgmt, points: resultPts } = item;
                         const mgmtCode32 = item.managementCode32 !== undefined && item.managementCode32 !== null
