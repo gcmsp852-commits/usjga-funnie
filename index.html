@@ -212,6 +212,10 @@
                     <img id="dsImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
                 </div>
             </div>
+            <div class="qr-data-card" id="scanStatsCard" style="border-color:#FF1744; margin-top:12px;">
+                <label style="color:#FF1744;">読取デバッグ情報</label>
+                <div class="text" id="scanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
+            </div>
             <button class="btn" onclick="restartScan()">もう一度スキャン</button>
         </div>
     </div>
@@ -347,6 +351,7 @@
         let savedQ2AppEncData = null;
         const JSQR_CROP_DEBUG_MS = 700;
         let jsQrCropDebugRects = [];
+        let scanDebugStats = null;
 
         // ★ 端末情報登録システム
         let currentTerminalHashes = [];
@@ -1129,6 +1134,7 @@
         function markJsQrCropRect(sx, sy, sw, sh, label = 'jsQR crop') {
             if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(sw) || !Number.isFinite(sh)) return;
             if (sw <= 0 || sh <= 0) return;
+            recordJsQrInput(label, 'crop');
             jsQrCropDebugRects.push({
                 x: sx,
                 y: sy,
@@ -1140,6 +1146,104 @@
             if (jsQrCropDebugRects.length > 24) {
                 jsQrCropDebugRects = jsQrCropDebugRects.slice(-24);
             }
+        }
+
+        function resetScanDebugStats() {
+            scanDebugStats = {
+                startedAt: Date.now(),
+                stages: {},
+                lastInput: null,
+                successInput: null
+            };
+            jsQrCropDebugRects = [];
+        }
+
+        function getScanDebugStats() {
+            if (!scanDebugStats) resetScanDebugStats();
+            return scanDebugStats;
+        }
+
+        function getPhaseDebugStats(stage, phase) {
+            const stats = getScanDebugStats();
+            const stageKey = String(stage || scanStage || 0);
+            if (!stats.stages[stageKey]) stats.stages[stageKey] = { phases: {} };
+            const phaseKey = phase || '不明フェーズ';
+            if (!stats.stages[stageKey].phases[phaseKey]) {
+                stats.stages[stageKey].phases[phaseKey] = {
+                    barcodeDetectCalls: 0,
+                    barcodeDetections: 0,
+                    cropJsQrCalls: 0,
+                    fullJsQrCalls: 0,
+                    successCount: 0
+                };
+            }
+            return stats.stages[stageKey].phases[phaseKey];
+        }
+
+        function recordBarcodeDetections(phase, count, stage = scanStage) {
+            const phaseStats = getPhaseDebugStats(stage, phase);
+            phaseStats.barcodeDetectCalls += 1;
+            phaseStats.barcodeDetections += Math.max(0, Number(count) || 0);
+        }
+
+        function recordJsQrInput(phase, imageType, stage = scanStage) {
+            const phaseStats = getPhaseDebugStats(stage, phase);
+            if (imageType === 'full') {
+                phaseStats.fullJsQrCalls += 1;
+            } else {
+                phaseStats.cropJsQrCalls += 1;
+            }
+            getScanDebugStats().lastInput = {
+                stage,
+                phase,
+                imageType,
+                at: Date.now()
+            };
+        }
+
+        function recordJsQrSuccess(qrNo = null) {
+            const stats = getScanDebugStats();
+            if (!stats.lastInput) return;
+            const input = { ...stats.lastInput, qrNo, at: Date.now() };
+            stats.successInput = input;
+            getPhaseDebugStats(input.stage, input.phase).successCount += 1;
+        }
+
+        function formatScanDebugStats() {
+            const stats = getScanDebugStats();
+            const lines = [];
+            const success = stats.successInput;
+            lines.push('最終復号成功: ' + (success
+                ? `Stage ${success.stage} / ${success.phase} / ${success.imageType}` + (success.qrNo === null || success.qrNo === undefined ? '' : ` / QR${success.qrNo + 1}`)
+                : '-'));
+            const last = stats.lastInput;
+            lines.push('最後にjsQRへ渡した画像: ' + (last
+                ? `Stage ${last.stage} / ${last.phase} / ${last.imageType}`
+                : '-'));
+            lines.push('');
+
+            const stageKeys = Object.keys(stats.stages).sort((a, b) => Number(a) - Number(b));
+            if (stageKeys.length === 0) {
+                lines.push('計測データなし');
+                return lines.join('\n');
+            }
+            for (const stageKey of stageKeys) {
+                lines.push(`Stage ${stageKey}`);
+                const phases = stats.stages[stageKey].phases;
+                for (const phaseKey of Object.keys(phases)) {
+                    const p = phases[phaseKey];
+                    lines.push(
+                        `  ${phaseKey}: BarcodeDetector ${p.barcodeDetections}個/${p.barcodeDetectCalls}回, ` +
+                        `jsQR crop ${p.cropJsQrCalls}回, full ${p.fullJsQrCalls}回, 成功 ${p.successCount}回`
+                    );
+                }
+            }
+            return lines.join('\n');
+        }
+
+        function renderScanDebugStats() {
+            const el = document.getElementById('scanStatsText');
+            if (el) el.innerText = formatScanDebugStats();
         }
 
         function drawJsQrCropDebugRects() {
@@ -2245,6 +2349,7 @@
                 document.getElementById('cameraControls').style.display = 'flex';
                 scanStage = 1;
                 isScanning = true;
+                resetScanDebugStats();
                 startWatchingPosition();
 
                 if (scanMode === 'normal') {
@@ -2862,6 +2967,7 @@
                 renderResultText('resText2', secondQR ? secondQR.text : null);
             }
 
+            renderScanDebugStats();
             document.getElementById('resultScreen').style.display = 'flex';
         }
 
@@ -2878,6 +2984,7 @@
             appMask = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
+            resetScanDebugStats();
             resetColorScanResult();
             sysEncStage3 = false;
             digitalSignStage3 = false;
@@ -2914,6 +3021,7 @@
             appMask = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
+            resetScanDebugStats();
             resetColorScanResult();
             sysEncStage3 = false;
             digitalSignStage3 = false;
@@ -5352,7 +5460,7 @@
                                 zxingCanvas.height = _q2box.sh;
                                 zxingCtx.drawImage(video, _q2box.sx, _q2box.sy, _q2box.sw, _q2box.sh, 0, 0, _q2box.sw, _q2box.sh);
                                 const _cropData = zxingCtx.getImageData(0, 0, _q2box.sw, _q2box.sh);
-                                markJsQrCropRect(_q2box.sx, _q2box.sy, _q2box.sw, _q2box.sh, 'jsQR geometry crop');
+                                markJsQrCropRect(_q2box.sx, _q2box.sy, _q2box.sw, _q2box.sh, 'フェーズ0.5 幾何クロップ');
                                 const _geoOpts = {
                                     inversionAttempts: "attemptBoth",
                                     multi: true
@@ -5369,6 +5477,7 @@
                                         const _info = parseStandardMgmt(_m32);
                                         // ★ qrNo===1 を確認できた場合のみ採用（誤判別根絶）
                                         if (_info && _info.qrNo === 1) {
+                                            recordJsQrSuccess();
                                             detectedItems.push({
                                                 data: _it.data,
                                                 managementCode: _it.managementCode,
@@ -5399,6 +5508,7 @@
                                 }
                                 if (detectedItems.length === 0 && (sysEncStage3 || digitalSignStage3)) {
                                     const _geoBin = buildSauvolaBinaryFromRGBA(_cropData.data, _q2box.sw, _q2box.sh, 0);
+                                    recordJsQrInput('フェーズ0.5 幾何Sauvolaクロップ', 'crop');
                                     const _geoSauvolaOpts = {
                                         inversionAttempts: "attemptBoth",
                                         multi: true,
@@ -5415,6 +5525,7 @@
                                                 : getManagementCode32FromParts(_it.managementCode, _it.managementFlags16);
                                             const _info = parseStandardMgmt(_m32);
                                             if (_info && _info.qrNo === 1) {
+                                                recordJsQrSuccess();
                                                 detectedItems.push({
                                                     data: _it.data,
                                                     managementCode: _it.managementCode,
@@ -5456,6 +5567,7 @@
                     if (barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
                         try {
                             const barcodes = await barcodeDetector.detect(video);
+                            recordBarcodeDetections('フェーズ1.0 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             if (barcodes && barcodes.length > 0) {
                                 // ★ Stage 3 でもカメラ移動に追従するため lastTwinBBox を Union で更新する。
                                 //   （Stage 1 で固定された古い位置に頼ると、ユーザが少しでもカメラを動かした
@@ -5490,7 +5602,7 @@
                                     zxingCanvas.height = sh;
                                     zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                                     const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                    markJsQrCropRect(sx, sy, sw, sh, 'jsQR BD crop');
+                                    markJsQrCropRect(sx, sy, sw, sh, 'フェーズ1.0 BarcodeDetectorクロップ');
 
                                     const cropResList = jsQR(imgData.data, sw, sh, {
                                         inversionAttempts: "attemptBoth",
@@ -5500,6 +5612,7 @@
                                     if (cropResList && cropResList.length > 0) {
                                         for (const cropRes of cropResList) {
                                             if (cropRes && cropRes.data && !cropRes.isRaw) {
+                                                recordJsQrSuccess();
                                                 detectedItems.push({
                                                     data: cropRes.data,
                                                     managementCode: cropRes.managementCode,
@@ -5536,6 +5649,7 @@
                     if (detectedItems.length === 0 && useNativeDetector) {
                         try {
                             const barcodes = await barcodeDetector.detect(video);
+                            recordBarcodeDetections('フェーズ1 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             if (barcodes && barcodes.length > 0) {
                                 // ★ 第2QR を素早く拾うための重要処理：
                                 //   BarcodeDetector が返した「すべての BBox の UNION」を lastTwinBBox に保存する。
@@ -5577,12 +5691,13 @@
                                     zxingCanvas.height = sh;
                                     zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                                     const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                    markJsQrCropRect(sx, sy, sw, sh, 'jsQR BD crop');
+                                    markJsQrCropRect(sx, sy, sw, sh, 'フェーズ1 BarcodeDetectorクロップ');
 
                                     const resList = jsQR(imgData.data, sw, sh, { inversionAttempts: "attemptBoth", multi: true });
                                     if (resList && resList.length > 0) {
                                         for (const res of resList) {
                                             if (res && res.data && !res.isRaw) {
+                                                recordJsQrSuccess();
                                                 detectedItems.push({
                                                     data: res.data,
                                                     managementCode: res.managementCode,
@@ -5680,6 +5795,7 @@
                             try {
                                 // BarcodeDetector はキャンバスも入力に取れる（ImageBitmapSource）
                                 const barcodes = await barcodeDetector.detect(zxingCanvas);
+                                recordBarcodeDetections('フェーズ1.5 中央クロップBarcodeDetector', barcodes ? barcodes.length : 0);
                                 if (barcodes && barcodes.length > 0) {
                                     for (let i = 0; i < barcodes.length; i++) {
                                         const b = barcodes[i];
@@ -5697,7 +5813,7 @@
                                         zxingCanvas.height = dsh;
                                         zxingCtx.drawImage(video, dsx, dsy, dsw, dsh, 0, 0, dsw, dsh);
                                         const imgData = zxingCtx.getImageData(0, 0, dsw, dsh);
-                                        markJsQrCropRect(dsx, dsy, dsw, dsh, 'jsQR BD crop');
+                                        markJsQrCropRect(dsx, dsy, dsw, dsh, 'フェーズ1.5 中央クロップBarcodeDetector');
 
                                         const cropOpts = { inversionAttempts: "attemptBoth", multi: true };
                                         if (scanStage === 3) {
@@ -5710,6 +5826,7 @@
                                         if (resList && resList.length > 0) {
                                             for (const res of resList) {
                                                 if (res && res.data && !res.isRaw) {
+                                                    recordJsQrSuccess();
                                                     detectedItems.push({
                                                         data: res.data,
                                                         managementCode: res.managementCode,
@@ -5749,6 +5866,7 @@
                     if (detectedItems.length === 0 && barcodeDetector && scanStage === 3 && appMask) {
                         try {
                             const barcodes = await barcodeDetector.detect(video);
+                            recordBarcodeDetections('フェーズ2 appMask BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             if (barcodes && barcodes.length > 0) {
                                 for (let i = 0; i < barcodes.length; i++) {
                                     const b = barcodes[i];
@@ -5763,7 +5881,7 @@
                                     zxingCanvas.height = sh;
                                     zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                                     const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                    markJsQrCropRect(sx, sy, sw, sh, 'jsQR app crop');
+                                    markJsQrCropRect(sx, sy, sw, sh, 'フェーズ2 appMask BarcodeDetectorクロップ');
 
                                     const cropResList = jsQR(imgData.data, sw, sh, {
                                         inversionAttempts: "attemptBoth",
@@ -5775,6 +5893,7 @@
                                     if (cropResList && cropResList.length > 0) {
                                         for (const cropRes of cropResList) {
                                             if (cropRes && cropRes.data && !cropRes.isRaw) {
+                                                recordJsQrSuccess();
                                                 detectedItems.push({
                                                     data: cropRes.data,
                                                     managementCode: cropRes.managementCode,
@@ -5832,7 +5951,7 @@
                             zxingCanvas.height = sh;
                             zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                             const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                            markJsQrCropRect(sx, sy, sw, sh, 'jsQR lastBBox crop');
+                            markJsQrCropRect(sx, sy, sw, sh, 'フェーズ2.5 lastTwinBBoxクロップ');
 
                             const cropOpts = {
                                 inversionAttempts: "attemptBoth",
@@ -5849,6 +5968,7 @@
                             if (cropResList && cropResList.length > 0) {
                                 for (const cropRes of cropResList) {
                                     if (cropRes && cropRes.data && !cropRes.isRaw) {
+                                        recordJsQrSuccess();
                                         detectedItems.push({
                                             data: cropRes.data,
                                             managementCode: cropRes.managementCode,
@@ -5903,7 +6023,7 @@
                             zxingCanvas.height = sh;
                             zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
                             const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                            markJsQrCropRect(sx, sy, sw, sh, 'jsQR Sauvola crop');
+                            markJsQrCropRect(sx, sy, sw, sh, 'フェーズ2.5b Sauvolaクロップ');
 
                             // Sauvola 二値化（紙の低コントラスト対策）
                             // モジュールサイズの推定：bbox 幅 ≒ Q1 幅 ≒ 約 25〜37 モジュール
@@ -5926,6 +6046,7 @@
                             if (cropResList && cropResList.length > 0) {
                                 for (const cropRes of cropResList) {
                                     if (cropRes && cropRes.data && !cropRes.isRaw) {
+                                        recordJsQrSuccess();
                                         detectedItems.push({
                                             data: cropRes.data,
                                             managementCode: cropRes.managementCode,
@@ -5992,6 +6113,7 @@
                                 fastOpts.sysEncDecode = true;
                             }
 
+                            recordJsQrInput('フェーズ2.7 縮小全画面jsQR', 'full');
                             let fastResList = jsQR(fastData.data, tw, th, fastOpts);
                             if (fastResList && !Array.isArray(fastResList)) fastResList = [fastResList];
                             if (fastResList && fastResList.length > 0) {
@@ -6006,6 +6128,7 @@
                                         { x: r.location.bottomRightCorner.x * inv, y: r.location.bottomRightCorner.y * inv },
                                         { x: r.location.bottomLeftCorner.x * inv, y: r.location.bottomLeftCorner.y * inv }
                                     ];
+                                    recordJsQrSuccess();
                                     detectedItems.push({
                                         data: r.data,
                                         managementCode: r.managementCode,
@@ -6067,6 +6190,7 @@
                             adaptOpts.sysEncDecode = true;
                         }
 
+                        recordJsQrInput('フェーズ2.8 適応/Sauvola全画面jsQR', 'full');
                         let adaptResList = jsQR(adaptBin, tw, th, adaptOpts);
                         if (adaptResList && !Array.isArray(adaptResList)) adaptResList = [adaptResList];
                         if (adaptResList && adaptResList.length > 0) {
@@ -6080,6 +6204,7 @@
                                     { x: r.location.bottomRightCorner.x * inv, y: r.location.bottomRightCorner.y * inv },
                                     { x: r.location.bottomLeftCorner.x * inv,  y: r.location.bottomLeftCorner.y * inv }
                                 ];
+                                recordJsQrSuccess();
                                 detectedItems.push({
                                     data: r.data,
                                     managementCode: r.managementCode,
@@ -6128,6 +6253,7 @@
                             opts.sysEncDecode = true;
                         }
 
+                        recordJsQrInput('フェーズ3 全画面jsQR', 'full');
                         let resFullList = jsQR(fullData.data, fullData.width, fullData.height, opts);
                         if (resFullList && !Array.isArray(resFullList)) resFullList = [resFullList];
 
@@ -6136,6 +6262,7 @@
                                 if (resFull && resFull.data) {
                                     if (scanStage === 1 && resFull.isRaw) continue;
                                     
+                                    recordJsQrSuccess();
                                     detectedItems.push({
                                         data: resFull.data,
                                         managementCode: resFull.managementCode,
