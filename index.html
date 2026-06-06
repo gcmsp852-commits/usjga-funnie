@@ -78,6 +78,9 @@
         .qr-data-card .text { font-size: 1.1rem; color: #fff; word-break: break-all; font-family: monospace; }
         .qr-data-card .text a { color: #64B5F6; text-decoration: underline; }
         .qr-data-card .mgmt { font-size: 0.8rem; color: #4CAF50; font-family: monospace; margin-top: 4px; }
+        #resultScreen { justify-content: flex-start; overflow-y: auto; }
+        #resultScreen .overlay-box { max-height: calc(100dvh - 40px); overflow-y: auto; max-width: 520px; }
+        #scanStatsText { max-height: 34dvh; overflow-y: auto; overflow-x: auto; font-size: 0.82rem; line-height: 1.35; word-break: normal; white-space: pre; }
         
         .enc-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; }
         .enc-badge.sys { background: rgba(255,111,0,0.2); color: #FF6F00; border: 1px solid rgba(255,111,0,0.4); }
@@ -86,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader13</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1153,7 +1156,8 @@
                 startedAt: Date.now(),
                 stages: {},
                 lastInput: null,
-                successInput: null
+                successInput: null,
+                successByQr: {}
             };
             jsQrCropDebugRects = [];
         }
@@ -1203,40 +1207,73 @@
 
         function recordJsQrSuccess(qrNo = null) {
             const stats = getScanDebugStats();
-            if (!stats.lastInput) return;
+            if (!stats.lastInput) return null;
             const input = { ...stats.lastInput, qrNo, at: Date.now() };
             stats.successInput = input;
+            if (qrNo === 0 || qrNo === 1) stats.successByQr[String(qrNo)] = input;
             getPhaseDebugStats(input.stage, input.phase).successCount += 1;
+            return input;
+        }
+
+        function recordQrSpecificSuccess(debugInput, qrNo) {
+            if (!debugInput || !(qrNo === 0 || qrNo === 1)) return;
+            const stats = getScanDebugStats();
+            const input = { ...debugInput, qrNo, at: Date.now() };
+            stats.successByQr[String(qrNo)] = input;
         }
 
         function formatScanDebugStats() {
             const stats = getScanDebugStats();
             const lines = [];
-            const success = stats.successInput;
-            lines.push('最終復号成功: ' + (success
-                ? `Stage ${success.stage} / ${success.phase} / ${success.imageType}` + (success.qrNo === null || success.qrNo === undefined ? '' : ` / QR${success.qrNo + 1}`)
-                : '-'));
+            const formatInput = (input) => input
+                ? `Stage ${input.stage} / ${input.phase} / ${input.imageType}`
+                : '-';
+
+            lines.push('第1QR 復号成功: ' + formatInput(stats.successByQr && stats.successByQr['0']));
+            lines.push('第2QR 復号成功: ' + formatInput(stats.successByQr && stats.successByQr['1']));
             const last = stats.lastInput;
             lines.push('最後にjsQRへ渡した画像: ' + (last
                 ? `Stage ${last.stage} / ${last.phase} / ${last.imageType}`
                 : '-'));
             lines.push('');
 
-            const stageKeys = Object.keys(stats.stages).sort((a, b) => Number(a) - Number(b));
-            if (stageKeys.length === 0) {
+            const renderStage = (stageKey) => {
+                lines.push(`Stage ${stageKey}`);
+                const stage = stats.stages[String(stageKey)];
+                if (!stage) {
+                    lines.push('  計測なし');
+                    return;
+                }
+                const phases = stage.phases;
+                const phaseKeys = Object.keys(phases);
+                if (phaseKeys.length === 0) {
+                    lines.push('  計測なし');
+                    return;
+                }
+                for (const phaseKey of phaseKeys) {
+                    const p = phases[phaseKey];
+                    lines.push(
+                        `  ${phaseKey}\n` +
+                        `    BarcodeDetector: 検出 ${p.barcodeDetections}個 / 呼出 ${p.barcodeDetectCalls}回\n` +
+                        `    jsQR: crop ${p.cropJsQrCalls}回 / full ${p.fullJsQrCalls}回 / 成功 ${p.successCount}回`
+                    );
+                }
+            };
+
+            if (Object.keys(stats.stages).length === 0) {
                 lines.push('計測データなし');
                 return lines.join('\n');
             }
-            for (const stageKey of stageKeys) {
-                lines.push(`Stage ${stageKey}`);
-                const phases = stats.stages[stageKey].phases;
-                for (const phaseKey of Object.keys(phases)) {
-                    const p = phases[phaseKey];
-                    lines.push(
-                        `  ${phaseKey}: BarcodeDetector ${p.barcodeDetections}個/${p.barcodeDetectCalls}回, ` +
-                        `jsQR crop ${p.cropJsQrCalls}回, full ${p.fullJsQrCalls}回, 成功 ${p.successCount}回`
-                    );
-                }
+            renderStage(1);
+            lines.push('');
+            renderStage(3);
+
+            const extraStages = Object.keys(stats.stages)
+                .filter(k => k !== '1' && k !== '3')
+                .sort((a, b) => Number(a) - Number(b));
+            for (const stageKey of extraStages) {
+                lines.push('');
+                renderStage(stageKey);
             }
             return lines.join('\n');
         }
@@ -5477,8 +5514,8 @@
                                         const _info = parseStandardMgmt(_m32);
                                         // ★ qrNo===1 を確認できた場合のみ採用（誤判別根絶）
                                         if (_info && _info.qrNo === 1) {
-                                            recordJsQrSuccess();
                                             detectedItems.push({
+                                                _debugInput: recordJsQrSuccess(),
                                                 data: _it.data,
                                                 managementCode: _it.managementCode,
                                                 managementCode32: _it.managementCode32,
@@ -5525,8 +5562,8 @@
                                                 : getManagementCode32FromParts(_it.managementCode, _it.managementFlags16);
                                             const _info = parseStandardMgmt(_m32);
                                             if (_info && _info.qrNo === 1) {
-                                                recordJsQrSuccess();
                                                 detectedItems.push({
+                                                    _debugInput: recordJsQrSuccess(),
                                                     data: _it.data,
                                                     managementCode: _it.managementCode,
                                                     managementCode32: _it.managementCode32,
@@ -5612,8 +5649,8 @@
                                     if (cropResList && cropResList.length > 0) {
                                         for (const cropRes of cropResList) {
                                             if (cropRes && cropRes.data && !cropRes.isRaw) {
-                                                recordJsQrSuccess();
                                                 detectedItems.push({
+                                                    _debugInput: recordJsQrSuccess(),
                                                     data: cropRes.data,
                                                     managementCode: cropRes.managementCode,
                                                     managementCode32: cropRes.managementCode32,
@@ -5697,8 +5734,8 @@
                                     if (resList && resList.length > 0) {
                                         for (const res of resList) {
                                             if (res && res.data && !res.isRaw) {
-                                                recordJsQrSuccess();
                                                 detectedItems.push({
+                                                    _debugInput: recordJsQrSuccess(),
                                                     data: res.data,
                                                     managementCode: res.managementCode,
                                                     managementCode32: res.managementCode32,
@@ -5826,8 +5863,8 @@
                                         if (resList && resList.length > 0) {
                                             for (const res of resList) {
                                                 if (res && res.data && !res.isRaw) {
-                                                    recordJsQrSuccess();
                                                     detectedItems.push({
+                                                        _debugInput: recordJsQrSuccess(),
                                                         data: res.data,
                                                         managementCode: res.managementCode,
                                                         managementCode32: res.managementCode32,
@@ -5893,8 +5930,8 @@
                                     if (cropResList && cropResList.length > 0) {
                                         for (const cropRes of cropResList) {
                                             if (cropRes && cropRes.data && !cropRes.isRaw) {
-                                                recordJsQrSuccess();
                                                 detectedItems.push({
+                                                    _debugInput: recordJsQrSuccess(),
                                                     data: cropRes.data,
                                                     managementCode: cropRes.managementCode,
                                                     managementCode32: cropRes.managementCode32,
@@ -5968,8 +6005,8 @@
                             if (cropResList && cropResList.length > 0) {
                                 for (const cropRes of cropResList) {
                                     if (cropRes && cropRes.data && !cropRes.isRaw) {
-                                        recordJsQrSuccess();
                                         detectedItems.push({
+                                            _debugInput: recordJsQrSuccess(),
                                             data: cropRes.data,
                                             managementCode: cropRes.managementCode,
                                                     managementCode32: cropRes.managementCode32,
@@ -6046,8 +6083,8 @@
                             if (cropResList && cropResList.length > 0) {
                                 for (const cropRes of cropResList) {
                                     if (cropRes && cropRes.data && !cropRes.isRaw) {
-                                        recordJsQrSuccess();
                                         detectedItems.push({
+                                            _debugInput: recordJsQrSuccess(),
                                             data: cropRes.data,
                                             managementCode: cropRes.managementCode,
                                             managementCode32: cropRes.managementCode32,
@@ -6128,8 +6165,8 @@
                                         { x: r.location.bottomRightCorner.x * inv, y: r.location.bottomRightCorner.y * inv },
                                         { x: r.location.bottomLeftCorner.x * inv, y: r.location.bottomLeftCorner.y * inv }
                                     ];
-                                    recordJsQrSuccess();
                                     detectedItems.push({
+                                        _debugInput: recordJsQrSuccess(),
                                         data: r.data,
                                         managementCode: r.managementCode,
                                         managementCode32: r.managementCode32,
@@ -6204,8 +6241,8 @@
                                     { x: r.location.bottomRightCorner.x * inv, y: r.location.bottomRightCorner.y * inv },
                                     { x: r.location.bottomLeftCorner.x * inv,  y: r.location.bottomLeftCorner.y * inv }
                                 ];
-                                recordJsQrSuccess();
                                 detectedItems.push({
+                                    _debugInput: recordJsQrSuccess(),
                                     data: r.data,
                                     managementCode: r.managementCode,
                                     managementCode32: r.managementCode32,
@@ -6262,8 +6299,8 @@
                                 if (resFull && resFull.data) {
                                     if (scanStage === 1 && resFull.isRaw) continue;
                                     
-                                    recordJsQrSuccess();
                                     detectedItems.push({
+                                        _debugInput: recordJsQrSuccess(),
                                         data: resFull.data,
                                         managementCode: resFull.managementCode,
                                         managementCode32: resFull.managementCode32,
@@ -6305,6 +6342,7 @@
                             : getManagementCode32FromParts(resultMgmt, item.managementFlags16);
                         const mgmtInfo = parseStandardMgmt(mgmtCode32);
                         const qrNo = mgmtInfo ? mgmtInfo.qrNo : null;
+                        recordQrSpecificSuccess(item._debugInput, qrNo);
 
                         if (scanStage === 1) {
                             // Stage 1でQRを発見した際、領域を保存（複数検出時は UNION で代表させる）
