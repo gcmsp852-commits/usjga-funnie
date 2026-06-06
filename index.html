@@ -2385,6 +2385,18 @@
             provisionalSecondRawQR = null;
         }
 
+        function getScanStageDisplayName() {
+            if (scanStage === 1) return 'Stage1: 第1QR・第2QR同時探索';
+            if (scanStage === 2) return 'Stage2: 入力待ち';
+            if (scanStage === 3) return 'Stage3: 第2QR探索';
+            return 'Stage0: 待機';
+        }
+
+        function setScanPhaseStatus(phaseName) {
+            if (!statusText) return;
+            statusText.innerText = getScanStageDisplayName() + ' / ' + phaseName;
+        }
+
         function buildStoredQrFromJsQRResult(res, offsetX = 0, offsetY = 0) {
             if (!res) return null;
             const pts = getQrPointsWithOffset(res, offsetX, offsetY);
@@ -5388,6 +5400,7 @@
                             || (scanMode === 'digital_sign' && digitalSignStage3 && !secondQR)
                         );
                     if (canUseQ2GeometryCrop) {
+                        setScanPhaseStatus('フェーズ0.5: 幾何クロップ');
                         const _q2box = estimateQ2BBoxFromQ1(q2SeedPointsForGeometry, firstQR.versionNumber);
                         if (_q2box) {
                             try {
@@ -5496,6 +5509,7 @@
                     // → BarcodeDetector でクロップ位置を取得し、その小領域に対してのみ jsQR(sysEncDecode) を呼ぶ。
                     // 全画面 jsQR よりも数倍〜十倍程度高速化される（縦持ち/横持ち問わず効果大）。
                     if (barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
+                        setScanPhaseStatus('フェーズ1.0: BarcodeDetector位置検出 + PM反転復号');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             if (barcodes && barcodes.length > 0) {
@@ -5575,6 +5589,7 @@
 
                     // --- [フェーズ 1 / ネイティブ優先] Hybrid (BarcodeDetector Crop + jsQR) ---
                     if (detectedItems.length === 0 && useNativeDetector) {
+                        setScanPhaseStatus('フェーズ1: BarcodeDetectorクロップ + jsQR');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             if (barcodes && barcodes.length > 0) {
@@ -5711,6 +5726,7 @@
                     // 1フレームあたり 1 スケールだけを試行し、フレーム毎に巡回するので
                     // 検出ループの高速性は保ちつつ、複数サイズの QR を均等にカバーできる。
                     if (detectedItems.length === 0 && useNativeDetector && barcodeDetector) {
+                        setScanPhaseStatus('フェーズ1.5: 中央クロップ + BarcodeDetector');
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const minDim = Math.min(vw, vh);
@@ -5798,6 +5814,7 @@
                     // appMask設定時: BarcodeDetectorでQRの位置だけ検出→クロップ→jsQRで暗号復号
                     // BarcodeDetector自身は暗号化QRを復号できないが、位置検出は高速に行える
                     if (detectedItems.length === 0 && barcodeDetector && scanStage === 3 && appMask) {
+                        setScanPhaseStatus('フェーズ2: appMask用BarcodeDetectorクロップ');
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             if (barcodes && barcodes.length > 0) {
@@ -5860,6 +5877,7 @@
                     // --- [フェーズ 2.5] Stage 1位置再利用 + jsQRクロップ復号 (二重暗号化などBarcodeDetector失敗時用) ---
                     // Stage 1で既にツインの座標を取得しているため、その周辺だけを探すことでフルスクリーンを回避する
                     if (detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
+                        setScanPhaseStatus('フェーズ2.5: lastTwinBBoxクロップ');
                         const bbox = lastTwinBBox;
                         // ★ アスペクト比を見てパディングを切替える
                         //   ・bbox が正方形に近い → 第1QR 単体を捕捉している可能性が高いので
@@ -5934,6 +5952,7 @@
                     // **Sauvola 二値化**（局所平均×局所標準偏差ベース、文書 OCR で標準）を
                     // 適用してから jsQR に渡す。第2QR の取りこぼしを大幅に削減する。
                     if (detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
+                        setScanPhaseStatus('フェーズ2.5b: Sauvola二値化クロップ');
                         const bbox = lastTwinBBox;
                         // ★ フェーズ2.5 と同じアスペクト比連動パディング
                         const _w2 = bbox.width, _h2 = bbox.height;
@@ -6011,6 +6030,7 @@
                     // BarcodeDetector がミスった時のフォールバック速度が劇的に向上する。
                     // 失敗時のみフェーズ3（フル解像度フルフレーム）に進む。
                     if (detectedItems.length === 0) {
+                        setScanPhaseStatus('フェーズ2.7: 縮小全画面jsQR');
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const FAST_MAX_DIM = 960;
@@ -6085,6 +6105,7 @@
                     //   ・低照度で全体が灰色に潰れている
                     // 等のケースを救済する。半解像度（≒1/4 画素）で動かすので約 5–10ms で完走する。
                     if (detectedItems.length === 0) {
+                        setScanPhaseStatus('フェーズ2.8: 適応二値化/Sauvola + jsQR');
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const ADAPT_MAX_DIM = 960;
@@ -6152,6 +6173,7 @@
 
                     // --- [フェーズ 3 / Fallback] Custom jsQR Full-Screen Scan ---
                     if (detectedItems.length === 0) {
+                        setScanPhaseStatus('フェーズ3: 最後に全画面jsQR');
                         zxingCanvas.width = overlayCanvas.width;
                         zxingCanvas.height = overlayCanvas.height;
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
