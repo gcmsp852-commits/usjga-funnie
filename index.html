@@ -86,7 +86,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader4</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -5951,7 +5951,7 @@
                     // フェーズ2.5（既定 binarizer）が空振りした時のみ、同じクロップ領域に
                     // **Sauvola 二値化**（局所平均×局所標準偏差ベース、文書 OCR で標準）を
                     // 適用してから jsQR に渡す。第2QR の取りこぼしを大幅に削減する。
-                    if (detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
+                    if (false && detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
                         setScanPhaseStatus('フェーズ2.5b: Sauvola二値化クロップ');
                         const bbox = lastTwinBBox;
                         // ★ フェーズ2.5 と同じアスペクト比連動パディング
@@ -6029,7 +6029,7 @@
                     // 十分に検出/復号でき、約 25〜35ms で完了する → 縦/横どちらの持ち方でも
                     // BarcodeDetector がミスった時のフォールバック速度が劇的に向上する。
                     // 失敗時のみフェーズ3（フル解像度フルフレーム）に進む。
-                    if (detectedItems.length === 0) {
+                    if (false && detectedItems.length === 0) {
                         setScanPhaseStatus('フェーズ2.7: 縮小全画面jsQR');
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
@@ -6104,7 +6104,7 @@
                     //   ・SECOM ロゴや地紋がコントラストを乱している
                     //   ・低照度で全体が灰色に潰れている
                     // 等のケースを救済する。半解像度（≒1/4 画素）で動かすので約 5–10ms で完走する。
-                    if (detectedItems.length === 0) {
+                    if (false && detectedItems.length === 0) {
                         setScanPhaseStatus('フェーズ2.8: 適応二値化/Sauvola + jsQR');
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
