@@ -345,6 +345,8 @@
         let lastTwinBBox = null; // ★ Stage 1で検出したツインQRの領域を保存
         let pendingAppEncFrame = null;
         let savedQ2AppEncData = null;
+        let provisionalSecondQR = null;
+        let provisionalSecondRawQR = null;
 
         // ★ 端末情報登録システム
         let currentTerminalHashes = [];
@@ -2206,6 +2208,12 @@
                 document.getElementById('btnContainer').style.display = 'none';
                 document.getElementById('cameraControls').style.display = 'flex';
                 scanStage = 1;
+                firstQR = null;
+                secondQR = null;
+                appMask = null;
+                pendingAppEncFrame = null;
+                savedQ2AppEncData = null;
+                resetProvisionalSecondQR();
                 isScanning = true;
                 startWatchingPosition();
 
@@ -2372,6 +2380,80 @@
         // ★ 内部実装：保存フレーム or 即時フレームから第2QRを復号する
         //   useSauvola=true で「移動平均→Sauvola二値化」したものを jsQR(preBinarized:true) に渡す。
         //   紙印刷の低コントラスト Q2 はこちらで初めて読めることが多い。
+        function resetProvisionalSecondQR() {
+            provisionalSecondQR = null;
+            provisionalSecondRawQR = null;
+        }
+
+        function buildStoredQrFromJsQRResult(res, offsetX = 0, offsetY = 0) {
+            if (!res) return null;
+            const pts = getQrPointsWithOffset(res, offsetX, offsetY);
+            return {
+                text: res.data || null,
+                data: res.data || null,
+                encryptedDataBytes: res.dataBytes ? Array.from(res.dataBytes) : null,
+                rawData: {
+                    encryptedDataBytes: res.dataBytes ? Array.from(res.dataBytes) : null,
+                    dataBytes: res.dataBytes ? Array.from(res.dataBytes) : null,
+                    version: res.version,
+                    versionNumber: res.versionNumber,
+                    formatInfo: res.formatInfo
+                },
+                managementCode: res.managementCode,
+                managementCode32: res.managementCode32,
+                managementFlags16: res.managementFlags16,
+                creationDateTimeExt32: res.creationDateTimeExt32,
+                managementExt32: res.managementExt32,
+                expiryExt32: res.expiryExt32,
+                readerIdExt32: res.readerIdExt32,
+                readLimitBits: res.readLimitBits,
+                qrTwinUniqueId8: res.qrTwinUniqueId8,
+                locationLatExt24: res.locationLatExt24,
+                locationLonExt24: res.locationLonExt24,
+                municipalityExt24: res.municipalityExt24,
+                codewords: res.correctedCodewords || res.codewords || null,
+                dataBytes: res.dataBytes,
+                versionNumber: res.versionNumber,
+                points: pts,
+                center: pts ? computeCenterFromPoints(pts) : null
+            };
+        }
+
+        function storeStage1SecondQrCandidate(res, offsetX = 0, offsetY = 0) {
+            if (!res) return;
+            const hasBytes = res.dataBytes && res.dataBytes.length;
+            const hasDecodedText = !!(res.data && !res.isRaw);
+            let mgmtInfo = null;
+            if (hasDecodedText) {
+                const mgmtCode32 = res.managementCode32 !== undefined && res.managementCode32 !== null
+                    ? (res.managementCode32 >>> 0)
+                    : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
+                mgmtInfo = parseStandardMgmt(mgmtCode32);
+            }
+
+            const stored = buildStoredQrFromJsQRResult(res, offsetX, offsetY);
+            if (!stored) return;
+
+            if (hasDecodedText && mgmtInfo && mgmtInfo.qrNo === 1) {
+                provisionalSecondQR = stored;
+                return;
+            }
+
+            // sysEncDecode flips the 3 PM bits before RS correction. If RS succeeds but
+            // the payload still cannot be decoded, keep it as a possible app-encrypted Q2.
+            if (hasBytes && (res.isRaw || !res.data || res.data === '')) {
+                provisionalSecondRawQR = stored;
+            }
+        }
+
+        function storeStage1SecondQrCandidates(resList, offsetX = 0, offsetY = 0) {
+            if (!resList) return;
+            const list = Array.isArray(resList) ? resList : [resList];
+            for (const res of list) {
+                storeStage1SecondQrCandidate(res, offsetX, offsetY);
+            }
+        }
+
         function finishAppEncFromFrame(frame, useSauvola) {
             if (!frame || !appMask || !firstQR) return false;
 
@@ -2839,6 +2921,7 @@
             appMask = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
+            resetProvisionalSecondQR();
             resetColorScanResult();
             sysEncStage3 = false;
             digitalSignStage3 = false;
@@ -2875,6 +2958,7 @@
             appMask = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
+            resetProvisionalSecondQR();
             resetColorScanResult();
             sysEncStage3 = false;
             digitalSignStage3 = false;
@@ -5536,6 +5620,18 @@
                                     const imgData = zxingCtx.getImageData(0, 0, sw, sh);
 
                                     const resList = jsQR(imgData.data, sw, sh, { inversionAttempts: "attemptBoth", multi: true });
+                                    if (scanStage === 1) {
+                                        storeStage1SecondQrCandidates(resList, sx, sy);
+                                        try {
+                                            const pmFlipList = jsQR(imgData.data, sw, sh, {
+                                                inversionAttempts: "attemptBoth",
+                                                multi: true,
+                                                sysEncDecode: true,
+                                                captureAppEncDataBytes: true
+                                            });
+                                            storeStage1SecondQrCandidates(pmFlipList, sx, sy);
+                                        } catch (e) { /* ignore PM-flip provisional decode error */ }
+                                    }
                                     if (resList && resList.length > 0) {
                                         for (const res of resList) {
                                             if (res && res.data && !res.isRaw) {
@@ -5614,7 +5710,7 @@
                     //
                     // 1フレームあたり 1 スケールだけを試行し、フレーム毎に巡回するので
                     // 検出ループの高速性は保ちつつ、複数サイズの QR を均等にカバーできる。
-                    if (false && detectedItems.length === 0 && useNativeDetector && barcodeDetector) {
+                    if (detectedItems.length === 0 && useNativeDetector && barcodeDetector) {
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const minDim = Math.min(vw, vh);
@@ -5763,7 +5859,7 @@
 
                     // --- [フェーズ 2.5] Stage 1位置再利用 + jsQRクロップ復号 (二重暗号化などBarcodeDetector失敗時用) ---
                     // Stage 1で既にツインの座標を取得しているため、その周辺だけを探すことでフルスクリーンを回避する
-                    if (false && detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
+                    if (detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || scanMode === 'normal') && lastTwinBBox) {
                         const bbox = lastTwinBBox;
                         // ★ アスペクト比を見てパディングを切替える
                         //   ・bbox が正方形に近い → 第1QR 単体を捕捉している可能性が高いので
@@ -5837,7 +5933,7 @@
                     // フェーズ2.5（既定 binarizer）が空振りした時のみ、同じクロップ領域に
                     // **Sauvola 二値化**（局所平均×局所標準偏差ベース、文書 OCR で標準）を
                     // 適用してから jsQR に渡す。第2QR の取りこぼしを大幅に削減する。
-                    if (false && detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
+                    if (detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
                         const bbox = lastTwinBBox;
                         // ★ フェーズ2.5 と同じアスペクト比連動パディング
                         const _w2 = bbox.width, _h2 = bbox.height;
@@ -5914,7 +6010,7 @@
                     // 十分に検出/復号でき、約 25〜35ms で完了する → 縦/横どちらの持ち方でも
                     // BarcodeDetector がミスった時のフォールバック速度が劇的に向上する。
                     // 失敗時のみフェーズ3（フル解像度フルフレーム）に進む。
-                    if (false && detectedItems.length === 0) {
+                    if (detectedItems.length === 0) {
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const FAST_MAX_DIM = 960;
@@ -5988,7 +6084,7 @@
                     //   ・SECOM ロゴや地紋がコントラストを乱している
                     //   ・低照度で全体が灰色に潰れている
                     // 等のケースを救済する。半解像度（≒1/4 画素）で動かすので約 5–10ms で完走する。
-                    if (false && detectedItems.length === 0) {
+                    if (detectedItems.length === 0) {
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const ADAPT_MAX_DIM = 960;
@@ -6055,7 +6151,7 @@
                     }
 
                     // --- [フェーズ 3 / Fallback] Custom jsQR Full-Screen Scan ---
-                    if (false && detectedItems.length === 0) {
+                    if (detectedItems.length === 0) {
                         zxingCanvas.width = overlayCanvas.width;
                         zxingCanvas.height = overlayCanvas.height;
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
@@ -6132,6 +6228,29 @@
                         const qrNo = mgmtInfo ? mgmtInfo.qrNo : null;
 
                         if (scanStage === 1) {
+                            if (qrNo === 1 && resultData) {
+                                provisionalSecondQR = {
+                                    text: resultData,
+                                    data: resultData,
+                                    managementCode: resultMgmt,
+                                    managementCode32: item.managementCode32,
+                                    managementFlags16: item.managementFlags16,
+                                    creationDateTimeExt32: item.creationDateTimeExt32,
+                                    managementExt32: item.managementExt32,
+                                    expiryExt32: item.expiryExt32,
+                                    readerIdExt32: item.readerIdExt32,
+                                    readLimitBits: item.readLimitBits,
+                                    qrTwinUniqueId8: item.qrTwinUniqueId8,
+                                    locationLatExt24: item.locationLatExt24,
+                                    locationLonExt24: item.locationLonExt24,
+                                    municipalityExt24: item.municipalityExt24,
+                                    codewords: item.codewords,
+                                    dataBytes: item.dataBytes,
+                                    versionNumber: item.versionNumber,
+                                    points: resultPts,
+                                    center: resultPts ? computeCenterFromPoints(resultPts) : null
+                                };
+                            }
                             // Stage 1でQRを発見した際、領域を保存（複数検出時は UNION で代表させる）
                             if (resultPts && resultPts.length === 4) {
                                 const xs = resultPts.map(p => p.x);
@@ -6219,12 +6338,16 @@
                                         return;
                                     }
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
+                                    if (provisionalSecondQR) {
+                                        secondQR = provisionalSecondQR;
+                                        resetProvisionalSecondQR();
+                                    }
                                     enterDigitalSignPairScan(1);
                                 } else if (qrNo === 1) {
                                     secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
                                     enterDigitalSignPairScan(0);
                                     statusText.innerText = "第1QR（元のデータ）を探索中...";
-                                } else {
+                                } else if (!(firstQR && secondQR)) {
                                     continue;
                                 }
                                 continue;
@@ -6302,6 +6425,14 @@
 
                             if (scanMode === 'normal') {
                                 if (mgmtInfo && mgmtInfo.sysEncFlag) {
+                                    if (provisionalSecondQR) {
+                                        secondQR = provisionalSecondQR;
+                                        resetProvisionalSecondQR();
+                                        isScanning = false;
+                                        isProcessing = false;
+                                        showResultScreen();
+                                        return;
+                                    }
                                     scanStage = 3;
                                     sysEncStage3 = true;
                                     if (firstQR) { preserveFirstQrGeometryForQ2(); ensureFirstCenter(firstQR); firstQR.points = null; }
@@ -6317,6 +6448,13 @@
                                         return;
                                     }
                                 } else if (mgmtInfo && mgmtInfo.appEncFlag) {
+                                    if (provisionalSecondRawQR) {
+                                        savedQ2AppEncData = provisionalSecondRawQR;
+                                        provisionalSecondRawQR = null;
+                                        isProcessing = false;
+                                        showPasswordScreen();
+                                        return;
+                                    }
                                     // ★ ユーザ暗号化：第2QR を「RS訂正成功で暗号文 E を取得」できた場合のみ
                                     //   「読取仮成功」とみなしパスワード画面へ遷移する。
                                     //   取得失敗時はパスワード画面を出さず、scanLoop を自然に次フレームへ
@@ -6345,6 +6483,14 @@
                                     statusText.innerText = "第2QR取得中... QRをそのままかざし続けてください";
                                     continue;
                                 } else {
+                                    if (provisionalSecondQR) {
+                                        secondQR = provisionalSecondQR;
+                                        resetProvisionalSecondQR();
+                                        isScanning = false;
+                                        isProcessing = false;
+                                        showResultScreen();
+                                        return;
+                                    }
                                     scanStage = 3;
                                     statusText.innerText = "第2QRを探索中...";
                                 }
@@ -6419,7 +6565,7 @@
                                         return;
                                     }
                                 } else {
-                                    continue; // それ以外の重複読取は無視
+                                    if (!(firstQR && secondQR)) continue; // それ以外の重複読取は無視
                                 }
 
                                 // 必要な両方のQRが揃った → 電子署名の検証を実行
