@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader11</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -218,6 +218,7 @@
             <div class="qr-data-card" id="scanStatsCard" style="border-color:#FF1744; margin-top:12px;">
                 <label style="color:#FF1744;">読取デバッグ情報</label>
                 <div class="text" id="scanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
+                <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; margin-top:8px;" onclick="copyScanDebugInfo()">コピー</button>
             </div>
             <button class="btn" onclick="restartScan()">もう一度スキャン</button>
         </div>
@@ -1157,7 +1158,17 @@
                 stages: {},
                 lastInput: null,
                 successInput: null,
-                successByQr: {}
+                successByQr: {},
+                videoSize: null,
+                qr1Corners: null,
+                geometryCrops: [],
+                q2Centers: [],
+                barcodeBoxes: [],
+                immediatePrelocate: {
+                    attempted: 0,
+                    success: 0,
+                    last: null
+                }
             };
             jsQrCropDebugRects = [];
         }
@@ -1188,6 +1199,90 @@
             const phaseStats = getPhaseDebugStats(stage, phase);
             phaseStats.barcodeDetectCalls += 1;
             phaseStats.barcodeDetections += Math.max(0, Number(count) || 0);
+        }
+
+        function fmtNum(v) {
+            return Number.isFinite(Number(v)) ? Number(v).toFixed(1) : '-';
+        }
+
+        function fmtPoint(p) {
+            return p ? `(${fmtNum(p.x)},${fmtNum(p.y)})` : '(-,-)';
+        }
+
+        function fmtRect(r) {
+            return r ? `sx=${fmtNum(r.sx ?? r.x)}, sy=${fmtNum(r.sy ?? r.y)}, sw=${fmtNum(r.sw ?? r.width)}, sh=${fmtNum(r.sh ?? r.height)}` : '-';
+        }
+
+        function limitDebugArray(arr, max = 20) {
+            if (arr.length > max) arr.splice(0, arr.length - max);
+        }
+
+        function recordVideoSize() {
+            const stats = getScanDebugStats();
+            if (video && video.videoWidth && video.videoHeight) {
+                stats.videoSize = { width: video.videoWidth, height: video.videoHeight };
+            }
+        }
+
+        function recordGeometryCropDebug(box, phase = 'フェーズ0.5 幾何クロップ') {
+            if (!box) return;
+            const stats = getScanDebugStats();
+            stats.geometryCrops.push({
+                stage: scanStage,
+                phase,
+                sx: box.sx,
+                sy: box.sy,
+                sw: box.sw,
+                sh: box.sh
+            });
+            if (box.q2cx !== undefined && box.q2cy !== undefined) {
+                stats.q2Centers.push({
+                    stage: scanStage,
+                    phase,
+                    x: box.q2cx,
+                    y: box.q2cy
+                });
+            }
+            limitDebugArray(stats.geometryCrops);
+            limitDebugArray(stats.q2Centers);
+        }
+
+        function recordBarcodeBoxes(phase, barcodes, stage = scanStage, source = 'video') {
+            if (!barcodes || !barcodes.length) return;
+            const stats = getScanDebugStats();
+            for (let i = 0; i < barcodes.length; i++) {
+                const b = barcodes[i];
+                if (!b || !b.boundingBox) continue;
+                const bb = b.boundingBox;
+                stats.barcodeBoxes.push({
+                    stage,
+                    phase,
+                    source,
+                    index: i,
+                    x: bb.x,
+                    y: bb.y,
+                    width: bb.width,
+                    height: bb.height
+                });
+            }
+            limitDebugArray(stats.barcodeBoxes);
+        }
+
+        function recordQrCorners(qrNo, points) {
+            if (!(qrNo === 0) || !points || points.length !== 4) return;
+            getScanDebugStats().qr1Corners = points.map(p => ({ x: p.x, y: p.y }));
+        }
+
+        function recordImmediatePrelocate(attempted, success, detail = '') {
+            const stats = getScanDebugStats();
+            stats.immediatePrelocate.attempted += attempted ? 1 : 0;
+            stats.immediatePrelocate.success += success ? 1 : 0;
+            stats.immediatePrelocate.last = {
+                stage: scanStage,
+                success: !!success,
+                detail,
+                at: Date.now()
+            };
         }
 
         function recordJsQrInput(phase, imageType, stage = scanStage) {
@@ -1235,6 +1330,30 @@
             lines.push('最後にjsQRへ渡した画像: ' + (last
                 ? `Stage ${last.stage} / ${last.phase} / ${last.imageType}`
                 : '-'));
+            lines.push('video.videoWidth x video.videoHeight: ' + (stats.videoSize ? `${stats.videoSize.width} x ${stats.videoSize.height}` : '-'));
+            lines.push('第1QRの4角座標: ' + (stats.qr1Corners ? stats.qr1Corners.map(fmtPoint).join(' ') : '-'));
+            lines.push('即時プリロケート: ' + `試行 ${stats.immediatePrelocate.attempted}回 / 成功 ${stats.immediatePrelocate.success}回` + (stats.immediatePrelocate.last ? ` / 最後=${stats.immediatePrelocate.last.success ? '成功' : '失敗'} ${stats.immediatePrelocate.last.detail || ''}` : ''));
+            lines.push('');
+            lines.push('幾何クロップ sx, sy, sw, sh');
+            if (stats.geometryCrops.length) {
+                for (const g of stats.geometryCrops) lines.push(`  Stage ${g.stage} / ${g.phase}: ${fmtRect(g)}`);
+            } else {
+                lines.push('  -');
+            }
+            lines.push('Stage3で推定した第2QR中心点');
+            if (stats.q2Centers.length) {
+                for (const c of stats.q2Centers) lines.push(`  Stage ${c.stage} / ${c.phase}: ${fmtPoint(c)}`);
+            } else {
+                lines.push('  -');
+            }
+            lines.push('BarcodeDetector boundingBox');
+            if (stats.barcodeBoxes.length) {
+                for (const b of stats.barcodeBoxes) {
+                    lines.push(`  Stage ${b.stage} / ${b.phase} / ${b.source} #${b.index}: ${fmtRect(b)}`);
+                }
+            } else {
+                lines.push('  -');
+            }
             lines.push('');
 
             const renderStage = (stageKey) => {
@@ -1281,6 +1400,28 @@
         function renderScanDebugStats() {
             const el = document.getElementById('scanStatsText');
             if (el) el.innerText = formatScanDebugStats();
+        }
+
+        async function copyScanDebugInfo() {
+            const text = formatScanDebugStats();
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                statusText.innerText = '読取デバッグ情報をコピーしました';
+            } catch (e) {
+                statusText.innerText = 'コピーに失敗しました';
+            }
         }
 
         function drawJsQrCropDebugRects() {
@@ -1588,6 +1729,7 @@
 
             let resList = null;
             try {
+                recordJsQrInput('即時プリロケート Sauvola全画面jsQR', 'full');
                 resList = jsQR(bin, tw, th, opts);
             } catch (e) { return null; }
             if (!resList) return null;
@@ -1601,6 +1743,7 @@
                     : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
                 const info = parseStandardMgmt(mc32);
                 if (!info || info.qrNo !== 1) continue;
+                recordJsQrSuccess(1);
 
                 const pts = [
                     { x: res.location.topLeftCorner.x     * inv, y: res.location.topLeftCorner.y     * inv },
@@ -1642,11 +1785,12 @@
             if (decodeOpts && decodeOpts.firstQrPoints) {
                 const q2box = estimateQ2BBoxFromQ1(decodeOpts.firstQrPoints, decodeOpts.firstQrVersionNumber);
                 if (q2box) {
+                    recordGeometryCropDebug(q2box, '即時プリロケート 幾何クロップ');
                     zxingCanvas.width = q2box.sw;
                     zxingCanvas.height = q2box.sh;
                 zxingCtx.drawImage(video, q2box.sx, q2box.sy, q2box.sw, q2box.sh, 0, 0, q2box.sw, q2box.sh);
                 const cropData = zxingCtx.getImageData(0, 0, q2box.sw, q2box.sh);
-                markJsQrCropRect(q2box.sx, q2box.sy, q2box.sw, q2box.sh, 'jsQR geometry crop');
+                markJsQrCropRect(q2box.sx, q2box.sy, q2box.sw, q2box.sh, '即時プリロケート 幾何クロップ');
                     // 切り出した小領域に対して Sauvola → jsQR / native → jsQR の両方を試す
                     const geoVariants = [
                         { name: 'GEO-native', input: cropData.data, preBin: false },
@@ -1681,6 +1825,7 @@
                                     { x: res.location.bottomRightCorner.x + q2box.sx, y: res.location.bottomRightCorner.y + q2box.sy },
                                     { x: res.location.bottomLeftCorner.x + q2box.sx,  y: res.location.bottomLeftCorner.y + q2box.sy }
                                 ];
+                                recordJsQrSuccess(1);
                                 return {
                                     text: null,
                                     data: null,
@@ -1710,6 +1855,7 @@
                                         { x: res.location.bottomRightCorner.x + q2box.sx, y: res.location.bottomRightCorner.y + q2box.sy },
                                         { x: res.location.bottomLeftCorner.x + q2box.sx,  y: res.location.bottomLeftCorner.y + q2box.sy }
                                     ];
+                                    recordJsQrSuccess(1);
                                     return {
                                         text: res.data, data: res.data,
                                         managementCode: res.managementCode,
@@ -1790,6 +1936,7 @@
 
                 let attempt = null;
                 try {
+                    recordJsQrInput(`即時プリロケート ${strat.name}`, 'full');
                     attempt = jsQR(input, tw, th, opts);
                 } catch (e) {
                     continue;
@@ -1856,6 +2003,7 @@
                 const info = parseStandardMgmt(mc32);
                 if (!info || info.qrNo !== 1) continue;
 
+                recordJsQrSuccess(1);
                 return {
                     text: res.data,
                     data: res.data,
@@ -1877,7 +2025,10 @@
                     center: computeCenterFromPoints(pts)
                 };
             }
-            if (rawAppEncCandidate) return rawAppEncCandidate;
+            if (rawAppEncCandidate) {
+                recordJsQrSuccess(1);
+                return rawAppEncCandidate;
+            }
             return null;
         }
 
@@ -5170,6 +5321,7 @@
             if (!isProcessing && now - lastDetectTime > SCAN_INTERVAL_MS && video.readyState >= 2) {
                 isProcessing = true;
                 lastDetectTime = now;
+                recordVideoSize();
 
                 // ★ このスキャン反復の中で lastTwinBBox を「再計算」したかのフラグ。
                 //   ・false（このイテレーションで未更新）→ 1つ目の検出で「上書き」する
@@ -5492,6 +5644,7 @@
                     if (canUseQ2GeometryCrop) {
                         const _q2box = estimateQ2BBoxFromQ1(q2SeedPointsForGeometry, firstQR.versionNumber);
                         if (_q2box) {
+                            recordGeometryCropDebug(_q2box, 'フェーズ0.5 幾何クロップ');
                             try {
                                 zxingCanvas.width = _q2box.sw;
                                 zxingCanvas.height = _q2box.sh;
@@ -5605,6 +5758,7 @@
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             recordBarcodeDetections('フェーズ1.0 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
+                            recordBarcodeBoxes('フェーズ1.0 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
                                 // ★ Stage 3 でもカメラ移動に追従するため lastTwinBBox を Union で更新する。
                                 //   （Stage 1 で固定された古い位置に頼ると、ユーザが少しでもカメラを動かした
@@ -5687,6 +5841,7 @@
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             recordBarcodeDetections('フェーズ1 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
+                            recordBarcodeBoxes('フェーズ1 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
                                 // ★ 第2QR を素早く拾うための重要処理：
                                 //   BarcodeDetector が返した「すべての BBox の UNION」を lastTwinBBox に保存する。
@@ -5833,6 +5988,7 @@
                                 // BarcodeDetector はキャンバスも入力に取れる（ImageBitmapSource）
                                 const barcodes = await barcodeDetector.detect(zxingCanvas);
                                 recordBarcodeDetections('フェーズ1.5 中央クロップBarcodeDetector', barcodes ? barcodes.length : 0);
+                                recordBarcodeBoxes('フェーズ1.5 中央クロップBarcodeDetector', barcodes, scanStage, 'centerCanvas');
                                 if (barcodes && barcodes.length > 0) {
                                     for (let i = 0; i < barcodes.length; i++) {
                                         const b = barcodes[i];
@@ -5904,6 +6060,7 @@
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             recordBarcodeDetections('フェーズ2 appMask BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
+                            recordBarcodeBoxes('フェーズ2 appMask BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
                                 for (let i = 0; i < barcodes.length; i++) {
                                     const b = barcodes[i];
@@ -6343,6 +6500,7 @@
                         const mgmtInfo = parseStandardMgmt(mgmtCode32);
                         const qrNo = mgmtInfo ? mgmtInfo.qrNo : null;
                         recordQrSpecificSuccess(item._debugInput, qrNo);
+                        recordQrCorners(qrNo, resultPts);
 
                         if (scanStage === 1) {
                             // Stage 1でQRを発見した際、領域を保存（複数検出時は UNION で代表させる）
@@ -6521,13 +6679,17 @@
                                     statusText.innerText = "第2QR（システム暗号化）を探索中...";
                                     // ★ 第2QR即時プリロケート：第1QR検出と同フレームで第2QRを検索
                                     //   ── 4–5秒問題の主因（Stage3 ループに入る前に同フレームで決着）
+                                    recordImmediatePrelocate(true, false, 'sysEnc legacy');
                                     const _q2Pre = preLocateQ2SysEncLegacy({ sysEncDecode: true });
                                     if (_q2Pre) {
+                                        recordImmediatePrelocate(false, true, 'sysEnc legacy');
                                         secondQR = _q2Pre;
                                         isScanning = false;
                                         isProcessing = false;
                                         showResultScreen();
                                         return;
+                                    } else {
+                                        recordImmediatePrelocate(false, false, 'sysEnc legacy');
                                     }
                                 } else if (mgmtInfo && mgmtInfo.appEncFlag) {
                                     // ★ ユーザ暗号化：第2QR を「RS訂正成功で暗号文 E を取得」できた場合のみ
@@ -6539,6 +6701,7 @@
                                     //     （UIスレッド占有を防ぐため）。scanLoop の通常リズム
                                     //     （SCAN_INTERVAL_MS = 40ms + rAF）で安全に再試行される。
                                     capturePendingAppEncFrame();
+                                    recordImmediatePrelocate(true, false, 'appEnc provisional');
                                     savedQ2AppEncData = preLocateQ2InCurrentFrame({
                                         sysEncDecode: true,
                                         captureAppEncDataBytes: true,
@@ -6547,11 +6710,13 @@
                                         firstQrVersionNumber: firstQR && firstQR.versionNumber
                                     });
                                     if (savedQ2AppEncData) {
+                                        recordImmediatePrelocate(false, true, 'appEnc provisional');
                                         // RS訂正成功 → 読取仮成功 → パスワード画面へ遷移
                                         isProcessing = false;
                                         showPasswordScreen();
                                         return;
                                     }
+                                    recordImmediatePrelocate(false, false, 'appEnc provisional');
                                     // RS訂正失敗 → パスワード画面を出さず、scanLoopを自然継続。
                                     // continue で for-of 次アイテムへ。残りがなければループ抜け、
                                     // scanLoop 末尾の requestAnimationFrame(scanLoop) で次フレーム再試行。
