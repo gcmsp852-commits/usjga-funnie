@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader8</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1152,22 +1152,97 @@
             }
         }
 
+        // ============================================================
+        //  ★ 計測拡張（P3）用ヘルパー
+        //   ・nowPerf()            : 単調増加の高精度時刻(ms)。経過時間計測に使う。
+        //   ・computeTiltAngleDeg()  : QRの傾き角（TL→TRベクトルの角度, deg）。
+        //   ・classifyOrientation()  : 傾き角から「正立(縦持ち)/90°回転(横持ち)/斜め」を判定。
+        //   ・recordProcessedFrame() : 実際に検出処理を行ったフレーム数をStage別に集計。
+        //   ・markQrDecodeTime()     : 第1/第2QRが確定した時刻(経過ms)とフレーム番号を記録。
+        //   ・recordPrelocateReason(): 即時プリロケートの失敗理由を記録。
+        //  すべて function 宣言（巻き上げ）なので定義順は問わない。
+        // ============================================================
+        function nowPerf() {
+            return (typeof performance !== 'undefined' && performance.now)
+                ? performance.now()
+                : Date.now();
+        }
+
+        function computeTiltAngleDeg(points) {
+            if (!points || points.length < 2) return null;
+            const tl = points[0], tr = points[1];
+            if (!tl || !tr) return null;
+            const dx = tr.x - tl.x;
+            const dy = tr.y - tl.y;
+            if (dx === 0 && dy === 0) return null;
+            let deg = Math.atan2(dy, dx) * 180 / Math.PI; // -180..180
+            return deg;
+        }
+
+        // TL→TR が水平(0/180°近辺)＝正立＝端末を縦持ちした時の見え方。
+        // TL→TR が垂直(90/270°近辺)＝90°回転＝端末を横持ちした時の見え方。
+        // （カメラバッファは常に縦長 1080x1920 固定で、物理回転はバッファ内のシーン回転として現れる）
+        function classifyOrientation(deg) {
+            if (deg === null || deg === undefined || !Number.isFinite(deg)) return '-';
+            let a = ((deg % 180) + 180) % 180;   // 0..180 に畳む
+            const d0  = Math.min(a, 180 - a);     // 0°/180° への距離
+            const d90 = Math.abs(a - 90);         // 90° への距離
+            if (d0 <= 30)  return '正立(縦持ち相当)';
+            if (d90 <= 30) return '90°回転(横持ち相当)';
+            return '斜め(' + a.toFixed(0) + '°)';
+        }
+
+        function recordProcessedFrame(stage) {
+            const stats = getScanDebugStats();
+            stats.frames.total += 1;
+            const k = String(stage);
+            stats.frames.byStage[k] = (stats.frames.byStage[k] || 0) + 1;
+        }
+
+        function markQrDecodeTime(qrNo) {
+            if (qrNo !== 0 && qrNo !== 1) return;
+            const stats = getScanDebugStats();
+            const elapsed = nowPerf() - (stats.startedPerf != null ? stats.startedPerf : nowPerf());
+            if (qrNo === 0 && stats.firstSuccessAt === null) {
+                stats.firstSuccessAt = elapsed;
+                stats.firstSuccessFrame = stats.frames.total;
+            }
+            if (qrNo === 1 && stats.secondSuccessAt === null) {
+                stats.secondSuccessAt = elapsed;
+                stats.secondSuccessFrame = stats.frames.total;
+            }
+        }
+
+        function recordPrelocateReason(reason) {
+            getScanDebugStats().immediatePrelocate.lastReason = reason;
+        }
+
         function resetScanDebugStats() {
             scanDebugStats = {
                 startedAt: Date.now(),
+                startedPerf: nowPerf(),
+                frames: { total: 0, byStage: {} },
+                firstSuccessAt: null,
+                secondSuccessAt: null,
+                firstSuccessFrame: null,
+                secondSuccessFrame: null,
                 stages: {},
                 lastInput: null,
                 successInput: null,
                 successByQr: {},
                 videoSize: null,
                 qr1Corners: null,
+                qr2Corners: null,
+                qr1Angle: null,
+                qr2Angle: null,
                 geometryCrops: [],
                 q2Centers: [],
                 barcodeBoxes: [],
                 immediatePrelocate: {
                     attempted: 0,
                     success: 0,
-                    last: null
+                    last: null,
+                    lastReason: null
                 }
             };
             jsQrCropDebugRects = [];
@@ -1269,8 +1344,15 @@
         }
 
         function recordQrCorners(qrNo, points) {
-            if (!(qrNo === 0) || !points || points.length !== 4) return;
-            getScanDebugStats().qr1Corners = points.map(p => ({ x: p.x, y: p.y }));
+            if (!points || points.length !== 4) return;
+            const stats = getScanDebugStats();
+            if (qrNo === 0) {
+                stats.qr1Corners = points.map(p => ({ x: p.x, y: p.y }));
+                stats.qr1Angle = computeTiltAngleDeg(points);
+            } else if (qrNo === 1) {
+                stats.qr2Corners = points.map(p => ({ x: p.x, y: p.y }));
+                stats.qr2Angle = computeTiltAngleDeg(points);
+            }
         }
 
         function recordImmediatePrelocate(attempted, success, detail = '') {
@@ -1305,7 +1387,10 @@
             if (!stats.lastInput) return null;
             const input = { ...stats.lastInput, qrNo, at: Date.now() };
             stats.successInput = input;
-            if (qrNo === 0 || qrNo === 1) stats.successByQr[String(qrNo)] = input;
+            if (qrNo === 0 || qrNo === 1) {
+                stats.successByQr[String(qrNo)] = input;
+                markQrDecodeTime(qrNo);
+            }
             getPhaseDebugStats(input.stage, input.phase).successCount += 1;
             return input;
         }
@@ -1315,6 +1400,7 @@
             const stats = getScanDebugStats();
             const input = { ...debugInput, qrNo, at: Date.now() };
             stats.successByQr[String(qrNo)] = input;
+            markQrDecodeTime(qrNo);
         }
 
         function formatScanDebugStats() {
@@ -1331,8 +1417,31 @@
                 ? `Stage ${last.stage} / ${last.phase} / ${last.imageType}`
                 : '-'));
             lines.push('video.videoWidth x video.videoHeight: ' + (stats.videoSize ? `${stats.videoSize.width} x ${stats.videoSize.height}` : '-'));
+
+            // ── P3計測: 所要時間・フレーム数 ──
+            const fmtMs = (v) => (v === null || v === undefined || !Number.isFinite(v)) ? '-' : Math.round(v) + 'ms';
+            const totalElapsed = (stats.startedPerf != null) ? (nowPerf() - stats.startedPerf) : null;
+            const s1Frames = stats.frames.byStage['1'] || 0;
+            const s3Frames = stats.frames.byStage['3'] || 0;
+            const q2AddFrames = (stats.secondSuccessFrame != null && stats.firstSuccessFrame != null)
+                ? (stats.secondSuccessFrame - stats.firstSuccessFrame) : null;
+            lines.push('第1QR確定まで: ' + fmtMs(stats.firstSuccessAt) + (stats.firstSuccessFrame != null ? ` / ${stats.firstSuccessFrame}フレーム目` : ''));
+            lines.push('第2QR確定まで: ' + fmtMs(stats.secondSuccessAt) + (stats.secondSuccessFrame != null ? ` / ${stats.secondSuccessFrame}フレーム目` : ''));
+            lines.push('第1→第2QRの追加フレーム数: ' + (q2AddFrames != null ? `${q2AddFrames}フレーム` : '-'));
+            lines.push('総経過(コピー時点): ' + fmtMs(totalElapsed) + ` / 総処理フレーム ${stats.frames.total} (Stage1=${s1Frames}, Stage3=${s3Frames})`);
+
+            // ── P3計測: QRの傾き角（縦持ち/横持ちの自動判定。バッファは常に縦長固定なので物理回転は傾き角に現れる） ──
+            const q1ang = (stats.qr1Angle != null) ? stats.qr1Angle : (stats.qr1Corners ? computeTiltAngleDeg(stats.qr1Corners) : null);
+            let q2ang = (stats.qr2Angle != null) ? stats.qr2Angle : null;
+            if (q2ang == null) {
+                try { if (typeof secondQR !== 'undefined' && secondQR && secondQR.points) q2ang = computeTiltAngleDeg(secondQR.points); } catch (e) {}
+            }
+            const fmtAng = (a) => (a == null || !Number.isFinite(a)) ? '-' : a.toFixed(1) + '° (' + classifyOrientation(a) + ')';
+            lines.push('第1QR傾き角: ' + fmtAng(q1ang));
+            lines.push('第2QR傾き角: ' + fmtAng(q2ang));
+
             lines.push('第1QRの4角座標: ' + (stats.qr1Corners ? stats.qr1Corners.map(fmtPoint).join(' ') : '-'));
-            lines.push('即時プリロケート: ' + `試行 ${stats.immediatePrelocate.attempted}回 / 成功 ${stats.immediatePrelocate.success}回` + (stats.immediatePrelocate.last ? ` / 最後=${stats.immediatePrelocate.last.success ? '成功' : '失敗'} ${stats.immediatePrelocate.last.detail || ''}` : ''));
+            lines.push('即時プリロケート: ' + `試行 ${stats.immediatePrelocate.attempted}回 / 成功 ${stats.immediatePrelocate.success}回` + (stats.immediatePrelocate.last ? ` / 最後=${stats.immediatePrelocate.last.success ? '成功' : '失敗'} ${stats.immediatePrelocate.last.detail || ''}` : '') + (stats.immediatePrelocate.lastReason ? ` / 理由=${stats.immediatePrelocate.lastReason}` : ''));
             lines.push('');
             lines.push('幾何クロップ sx, sy, sw, sh');
             if (stats.geometryCrops.length) {
@@ -1703,7 +1812,7 @@
         }
 
         function preLocateQ2SysEncLegacy(decodeOpts) {
-            if (!video || !video.videoWidth || !video.videoHeight) return null;
+            if (!video || !video.videoWidth || !video.videoHeight) { recordPrelocateReason('ビデオ未準備'); return null; }
             const vw = video.videoWidth;
             const vh = video.videoHeight;
             const maxDim = 960;
@@ -1731,18 +1840,23 @@
             try {
                 recordJsQrInput('即時プリロケート Sauvola全画面jsQR', 'full');
                 resList = jsQR(bin, tw, th, opts);
-            } catch (e) { return null; }
-            if (!resList) return null;
+            } catch (e) { recordPrelocateReason('jsQR例外'); return null; }
+            if (!resList) { recordPrelocateReason('QR未検出'); return null; }
             if (!Array.isArray(resList)) resList = [resList];
 
+            // ★ P3計測: 失敗理由の切り分け用フラグ
+            let _sawRaw = false;        // QRは見つかったが復号不可(isRaw/RS訂正失敗)
+            let _sawOtherQrNo = false;  // 復号できたが qrNo!==1（第1QRのみ等）
             const inv = 1 / scale;
             for (const res of resList) {
-                if (!res || !res.data || res.isRaw) continue;
+                if (!res) continue;
+                if (!res.data || res.isRaw) { _sawRaw = true; continue; }
                 const mc32 = (res.managementCode32 !== undefined && res.managementCode32 !== null)
                     ? (res.managementCode32 >>> 0)
                     : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
                 const info = parseStandardMgmt(mc32);
-                if (!info || info.qrNo !== 1) continue;
+                if (!info || info.qrNo !== 1) { _sawOtherQrNo = true; continue; }
+                recordPrelocateReason('成功');
                 recordJsQrSuccess(1);
 
                 const pts = [
@@ -1772,6 +1886,9 @@
                     center: computeCenterFromPoints(pts)
                 };
             }
+            // ループを抜けた＝qrNo===1 が得られなかった
+            recordPrelocateReason(_sawOtherQrNo ? 'Q2なし(第1QR等のみ検出)'
+                : (_sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
             return null;
         }
 
@@ -5322,6 +5439,8 @@
                 isProcessing = true;
                 lastDetectTime = now;
                 recordVideoSize();
+                // ★ P3計測: 実際に検出処理を回したフレームをStage別に集計（速度＝フレーム数の根拠）
+                recordProcessedFrame(scanStage);
 
                 // ★ このスキャン反復の中で lastTwinBBox を「再計算」したかのフラグ。
                 //   ・false（このイテレーションで未更新）→ 1つ目の検出で「上書き」する
