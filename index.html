@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader13</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -815,6 +815,10 @@
         // 0.65 ≒ 中サイズ用（V?の2行目想定）、0.40 ≒ 小サイズ用（V?の3行目想定）
         const SMALL_QR_CROP_SCALES = [0.65, 0.40];
         let smallQrCropFrameIdx = 0;
+        // ★ P0-1: 重い全画面jsQR(2.7/2.8/3)をフレーム毎に巡回させ、1フレームの処理数を減らす
+        let fullScanFrameIdx = 0;
+        // ★ P0-3: ネイティブBD不発時の補助検出（回転/二値化canvas）用オフスクリーン
+        let _bdAuxCanvas = null, _bdAuxCtx = null;
 
         // ============================================================
         //  ★ QRツイン識別ロジック（第2QR の判定強化）
@@ -1752,6 +1756,167 @@
         }
 
         // ============================================================
+        //  ★ P0改良 共通ヘルパー（全QRツイン種別で共用）
+        // ============================================================
+        // 反転試行の既定。暗→明の白黒紙では片方向で十分＝jsQRコスト半減（P0-1）。
+        // 復号方法（sysEncDecode / appEncMask / multi）は呼び出し側がモード規則どおりに渡す。
+        const QR_INV_PRIMARY = 'dontInvert';
+        const QR_INV_BOTH = 'attemptBoth';
+
+        // Otsu 大域しきい二値化。出力は Sauvola と同形式（0/255 シングルチャネル, <128=暗）。
+        function buildOtsuBinaryFromRGBA(rgba, width, height) {
+            const gray = rgbaToGrayscale(rgba, width, height, true);
+            const total = width * height;
+            const hist = new Int32Array(256);
+            for (let i = 0; i < total; i++) hist[gray[i]]++;
+            let sum = 0;
+            for (let t = 0; t < 256; t++) sum += t * hist[t];
+            let sumB = 0, wB = 0, maxVar = -1, thr = 127;
+            for (let t = 0; t < 256; t++) {
+                wB += hist[t];
+                if (wB === 0) continue;
+                const wF = total - wB;
+                if (wF === 0) break;
+                sumB += t * hist[t];
+                const mB = sumB / wB;
+                const mF = (sum - sumB) / wF;
+                const between = wB * wF * (mB - mF) * (mB - mF);
+                if (between > maxVar) { maxVar = between; thr = t; }
+            }
+            const out = new Uint8ClampedArray(total);
+            for (let i = 0; i < total; i++) out[i] = gray[i] < thr ? 0 : 255;
+            return out;
+        }
+
+        // RGBA を 90°回転して {data,width,height} を返す（dir: 'cw' | 'ccw'）。
+        // 縦/横どちらの提示でも jsQR の走査方向と印刷の方向性ノイズの相対関係を変えて
+        // 検出マージンを稼ぐための保険（P0-2 の回転バリアント用）。
+        function rotateRGBA90(rgba, width, height, dir) {
+            const nw = height, nh = width;
+            const out = new Uint8ClampedArray(nw * nh * 4);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const si = (y * width + x) * 4;
+                    let nx, ny;
+                    if (dir === 'cw') { nx = height - 1 - y; ny = x; }
+                    else { nx = y; ny = width - 1 - x; }
+                    const di = (ny * nw + nx) * 4;
+                    out[di] = rgba[si]; out[di + 1] = rgba[si + 1];
+                    out[di + 2] = rgba[si + 2]; out[di + 3] = rgba[si + 3];
+                }
+            }
+            return { data: out, width: nw, height: nh };
+        }
+        // 回転後画像の座標(rx,ry)を、回転前(元)画像の座標へ戻す。
+        function unrotatePoint90(rx, ry, origW, origH, dir) {
+            if (dir === 'cw') { return { x: ry, y: (origH - 1) - rx }; }
+            else { return { x: (origW - 1) - ry, y: rx }; }
+        }
+
+        // ★ 1つのRGBAクロップ/全画面に対し、複数二値化（jsQR標準→Sauvola→Otsu）を
+        //   安価な順に試し、最初に1件以上取れた結果配列を返す（P1の中核 / 各フェーズ共用）。
+        //   baseOpts にモード依存の {sysEncDecode, appEncMask, multi, captureAppEncDataBytes} を渡す。
+        //   反転は既定 dontInvert（P0-1）。全滅時のみ最後に attemptBoth を1回試す保険つき。
+        function jsqrMultiBin(rgba, w, h, baseOpts, moduleHint, wantQrNo) {
+            // 二値化は遅延生成（native成功時はSauvola/Otsuを作らず高速）
+            const makeInputs = [
+                () => ({ d: rgba, pre: false }),
+                () => ({ d: buildSauvolaBinaryFromRGBA(rgba, w, h, moduleHint || 0), pre: true }),
+                () => ({ d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true })
+            ];
+            // 目的の qrNo（第1QR=0 / 第2QR=1）が結果に含まれるか
+            const wantOk = (list) => {
+                if (wantQrNo === undefined || wantQrNo === null) return list.length > 0;
+                for (const r of list) {
+                    if (!r || !r.data || r.isRaw) continue;
+                    const mc = (r.managementCode32 !== undefined && r.managementCode32 !== null)
+                        ? (r.managementCode32 >>> 0)
+                        : getManagementCode32FromParts(r.managementCode, r.managementFlags16);
+                    const info = parseStandardMgmt(mc);
+                    if (info && info.qrNo === wantQrNo) return true;
+                }
+                return false;
+            };
+            // ★ 目的の qrNo が出たら即return。出なければ次の二値化も試す（重畳ツインで第2QRを取り逃さない）。
+            let acc = [];
+            for (const mk of makeInputs) {
+                let v;
+                try { v = mk(); } catch (e) { continue; }
+                const opts = Object.assign({}, baseOpts, { inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre });
+                let r = null;
+                try { r = jsQR(v.d, w, h, opts); } catch (e) { continue; }
+                if (r && !Array.isArray(r)) r = [r];
+                if (r && r.length) {
+                    acc = acc.concat(r);
+                    if (wantOk(r)) return acc;
+                }
+            }
+            // 保険：標準二値化＋反転両試行（白地反転印刷などの稀ケース）
+            if (!acc.length) {
+                try {
+                    let r = jsQR(rgba, w, h, Object.assign({}, baseOpts, { inversionAttempts: QR_INV_BOTH }));
+                    if (r && !Array.isArray(r)) r = [r];
+                    if (r && r.length) acc = acc.concat(r);
+                } catch (e) { /* ignore */ }
+            }
+            return acc;
+        }
+
+        // jsQR の result から、QRツイン共通の検出アイテム（detectedItems 用）を生成する。
+        // mapPt(x,y) はクロップ/スケール/回転を考慮して元画像座標へ写す関数。
+        function makeDetectedItem(res, mapPt, debugInput) {
+            const L = res.location;
+            return {
+                _debugInput: debugInput !== undefined ? debugInput : null,
+                data: res.data,
+                managementCode: res.managementCode,
+                managementCode32: res.managementCode32,
+                managementFlags16: res.managementFlags16,
+                creationDateTimeExt32: res.creationDateTimeExt32,
+                managementExt32: res.managementExt32,
+                expiryExt32: res.expiryExt32,
+                readerIdExt32: res.readerIdExt32,
+                readLimitBits: res.readLimitBits,
+                qrTwinUniqueId8: res.qrTwinUniqueId8,
+                locationLatExt24: res.locationLatExt24,
+                locationLonExt24: res.locationLonExt24,
+                municipalityExt24: res.municipalityExt24,
+                codewords: res.codewords,
+                dataBytes: res.dataBytes,
+                versionNumber: res.versionNumber,
+                points: [
+                    mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
+                    mapPt(L.topRightCorner.x, L.topRightCorner.y),
+                    mapPt(L.bottomRightCorner.x, L.bottomRightCorner.y),
+                    mapPt(L.bottomLeftCorner.x, L.bottomLeftCorner.y)
+                ]
+            };
+        }
+
+        // ★ 指定矩形(元動画座標)を切り出し、標準→Sauvola→Otsu の多二値化で復号して
+        //   detectedItems に積む共通ルーチン（P1：BD位置検出の復号歩留まりを底上げ）。
+        //   baseOpts はモード規則どおりの {sysEncDecode, appEncMask, multi}。
+        //   返り値: 1件以上積めたら true。
+        function decodeCropIntoItems(detectedItems, sx, sy, sw, sh, baseOpts, label, moduleHint, wantQrNo) {
+            sx = Math.max(0, Math.floor(sx)); sy = Math.max(0, Math.floor(sy));
+            sw = Math.floor(sw); sh = Math.floor(sh);
+            if (sw <= 0 || sh <= 0) return false;
+            zxingCanvas.width = sw;
+            zxingCanvas.height = sh;
+            zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+            const imgData = zxingCtx.getImageData(0, 0, sw, sh);
+            markJsQrCropRect(sx, sy, sw, sh, label); // crop計測＋デバッグ矩形
+            const list = jsqrMultiBin(imgData.data, sw, sh, baseOpts, moduleHint || 0, wantQrNo);
+            let pushed = false;
+            for (const res of list) {
+                if (!res || !res.data || res.isRaw) continue;
+                detectedItems.push(makeDetectedItem(res, (x, y) => ({ x: x + sx, y: y + sy }), recordJsQrSuccess()));
+                pushed = true;
+            }
+            return pushed;
+        }
+
+        // ============================================================
         //  ★ 第2QR 即時プリロケート（Stage1→Stage3 遷移直後の救済）
         //
         //  なぜ必要か:
@@ -1811,84 +1976,108 @@
             return { sx: sx, sy: sy, sw: sw, sh: sh, q2cx: q2cx, q2cy: q2cy, q1size: q1size, N: N };
         }
 
+        // ★ P0-2: 第2QR 即時プリロケートを「多変種」化（スケール×二値化×回転, 早期終了）。
+        //   1ショットだが当たれば即returnなので、当たる向き/印刷では従来同等に軽い。
+        //   ②縦の「QR未検出」のように1設定で外れるケースを同フレームで救済する。
+        //   復号規則は decodeOpts（sysEncDecode / appEncMask）に従う＝全モード共用。
         function preLocateQ2SysEncLegacy(decodeOpts) {
             if (!video || !video.videoWidth || !video.videoHeight) { recordPrelocateReason('ビデオ未準備'); return null; }
             const vw = video.videoWidth;
             const vh = video.videoHeight;
-            const maxDim = 960;
-            const scale = Math.min(1, maxDim / Math.max(vw, vh));
-            const tw = Math.max(1, Math.round(vw * scale));
-            const th = Math.max(1, Math.round(vh * scale));
 
-            zxingCanvas.width = tw;
-            zxingCanvas.height = th;
-            zxingCtx.drawImage(video, 0, 0, tw, th);
-            const data = zxingCtx.getImageData(0, 0, tw, th);
-            const bin = buildSauvolaBinaryFromRGBA(data.data, tw, th, 0);
-
-            const opts = {
-                inversionAttempts: 'attemptBoth',
-                multi: true,
-                preBinarized: true
-            };
+            const baseOpts = { multi: true };
             if (decodeOpts) {
-                if (decodeOpts.appEncMask)   opts.appEncMask   = decodeOpts.appEncMask;
-                if (decodeOpts.sysEncDecode) opts.sysEncDecode = decodeOpts.sysEncDecode;
+                if (decodeOpts.appEncMask)   baseOpts.appEncMask   = decodeOpts.appEncMask;
+                if (decodeOpts.sysEncDecode) baseOpts.sysEncDecode = decodeOpts.sysEncDecode;
             }
 
-            let resList = null;
-            try {
-                recordJsQrInput('即時プリロケート Sauvola全画面jsQR', 'full');
-                resList = jsQR(bin, tw, th, opts);
-            } catch (e) { recordPrelocateReason('jsQR例外'); return null; }
-            if (!resList) { recordPrelocateReason('QR未検出'); return null; }
-            if (!Array.isArray(resList)) resList = [resList];
+            let sawRaw = false, sawOther = false;
 
-            // ★ P3計測: 失敗理由の切り分け用フラグ
-            let _sawRaw = false;        // QRは見つかったが復号不可(isRaw/RS訂正失敗)
-            let _sawOtherQrNo = false;  // 復号できたが qrNo!==1（第1QRのみ等）
-            const inv = 1 / scale;
-            for (const res of resList) {
-                if (!res) continue;
-                if (!res.data || res.isRaw) { _sawRaw = true; continue; }
-                const mc32 = (res.managementCode32 !== undefined && res.managementCode32 !== null)
-                    ? (res.managementCode32 >>> 0)
-                    : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
-                const info = parseStandardMgmt(mc32);
-                if (!info || info.qrNo !== 1) { _sawOtherQrNo = true; continue; }
-                recordPrelocateReason('成功');
-                recordJsQrSuccess(1);
-
-                const pts = [
-                    { x: res.location.topLeftCorner.x     * inv, y: res.location.topLeftCorner.y     * inv },
-                    { x: res.location.topRightCorner.x    * inv, y: res.location.topRightCorner.y    * inv },
-                    { x: res.location.bottomRightCorner.x * inv, y: res.location.bottomRightCorner.y * inv },
-                    { x: res.location.bottomLeftCorner.x  * inv, y: res.location.bottomLeftCorner.y  * inv }
+            // 与えられたRGBAに対し 標準→Sauvola→Otsu を試し、qrNo===1 を見つけたら Q2 を返す。
+            // mapPt(x,y): その画像座標を元動画座標へ写す関数。
+            const tryDecode = (rgba, w, h, mapPt) => {
+                const variants = [
+                    { d: rgba, pre: false },
+                    { d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true },
+                    { d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true }
                 ];
-                return {
-                    text: res.data,
-                    data: res.data,
-                    managementCode: res.managementCode,
-                    managementCode32: res.managementCode32,
-                    managementFlags16: res.managementFlags16,
-                    creationDateTimeExt32: res.creationDateTimeExt32,
-                    managementExt32: res.managementExt32,
-                    expiryExt32: res.expiryExt32,
-                    readerIdExt32: res.readerIdExt32,
-                    readLimitBits: res.readLimitBits,
-                    qrTwinUniqueId8: res.qrTwinUniqueId8,
-                    locationLatExt24: res.locationLatExt24,
-                    locationLonExt24: res.locationLonExt24,
-                    municipalityExt24: res.municipalityExt24,
-                    codewords: res.codewords,
-                    dataBytes: res.dataBytes,
-                    points: pts,
-                    center: computeCenterFromPoints(pts)
-                };
+                for (const v of variants) {
+                    recordJsQrInput('即時プリロケート 多変種全画面jsQR', 'full');
+                    let r = null;
+                    try {
+                        r = jsQR(v.d, w, h, Object.assign({}, baseOpts, { inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre }));
+                    } catch (e) { continue; }
+                    if (r && !Array.isArray(r)) r = [r];
+                    if (!r) continue;
+                    for (const res of r) {
+                        if (!res) continue;
+                        if (!res.data || res.isRaw) { sawRaw = true; continue; }
+                        const mc32 = (res.managementCode32 !== undefined && res.managementCode32 !== null)
+                            ? (res.managementCode32 >>> 0)
+                            : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
+                        const info = parseStandardMgmt(mc32);
+                        if (!info || info.qrNo !== 1) { sawOther = true; continue; }
+                        recordPrelocateReason('成功');
+                        recordJsQrSuccess(1);
+                        const L = res.location;
+                        const pts = [
+                            mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
+                            mapPt(L.topRightCorner.x, L.topRightCorner.y),
+                            mapPt(L.bottomRightCorner.x, L.bottomRightCorner.y),
+                            mapPt(L.bottomLeftCorner.x, L.bottomLeftCorner.y)
+                        ];
+                        return {
+                            text: res.data,
+                            data: res.data,
+                            managementCode: res.managementCode,
+                            managementCode32: res.managementCode32,
+                            managementFlags16: res.managementFlags16,
+                            creationDateTimeExt32: res.creationDateTimeExt32,
+                            managementExt32: res.managementExt32,
+                            expiryExt32: res.expiryExt32,
+                            readerIdExt32: res.readerIdExt32,
+                            readLimitBits: res.readLimitBits,
+                            qrTwinUniqueId8: res.qrTwinUniqueId8,
+                            locationLatExt24: res.locationLatExt24,
+                            locationLonExt24: res.locationLonExt24,
+                            municipalityExt24: res.municipalityExt24,
+                            codewords: res.codewords,
+                            dataBytes: res.dataBytes,
+                            points: pts,
+                            center: computeCenterFromPoints(pts)
+                        };
+                    }
+                }
+                return null;
+            };
+
+            // スケール多重（モジュールが画素グリッドに乗り直すと検出マージンが変わる）
+            const scales = [960, 720];
+            for (const maxDim of scales) {
+                const scale = Math.min(1, maxDim / Math.max(vw, vh));
+                const tw = Math.max(1, Math.round(vw * scale));
+                const th = Math.max(1, Math.round(vh * scale));
+                zxingCanvas.width = tw;
+                zxingCanvas.height = th;
+                zxingCtx.drawImage(video, 0, 0, tw, th);
+                const data = zxingCtx.getImageData(0, 0, tw, th);
+                const inv = 1 / scale;
+                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }));
+                if (hit) return hit;
+
+                // 回転バリアント（960スケール時のみ：方向性ノイズ対策の保険）
+                if (maxDim === 960) {
+                    const rot = rotateRGBA90(data.data, tw, th, 'cw');
+                    const hitR = tryDecode(rot.data, rot.width, rot.height, (rx, ry) => {
+                        const p = unrotatePoint90(rx, ry, tw, th, 'cw');
+                        return { x: p.x * inv, y: p.y * inv };
+                    });
+                    if (hitR) return hitR;
+                }
             }
-            // ループを抜けた＝qrNo===1 が得られなかった
-            recordPrelocateReason(_sawOtherQrNo ? 'Q2なし(第1QR等のみ検出)'
-                : (_sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
+
+            recordPrelocateReason(sawOther ? 'Q2なし(第1QR等のみ検出)'
+                : (sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
             return null;
         }
 
@@ -1911,11 +2100,12 @@
                     // 切り出した小領域に対して Sauvola → jsQR / native → jsQR の両方を試す
                     const geoVariants = [
                         { name: 'GEO-native', input: cropData.data, preBin: false },
-                        { name: 'GEO-sauvola', input: buildSauvolaBinaryFromRGBA(cropData.data, q2box.sw, q2box.sh, 0), preBin: true }
+                        { name: 'GEO-sauvola', input: buildSauvolaBinaryFromRGBA(cropData.data, q2box.sw, q2box.sh, 0), preBin: true },
+                        { name: 'GEO-otsu', input: buildOtsuBinaryFromRGBA(cropData.data, q2box.sw, q2box.sh), preBin: true }
                     ];
                     for (const v of geoVariants) {
                         const opts = {
-                            inversionAttempts: 'attemptBoth',
+                            inversionAttempts: QR_INV_PRIMARY,
                             multi: true,
                             preBinarized: v.preBin,
                             sysEncDecode: !!(decodeOpts && decodeOpts.sysEncDecode),
@@ -2041,7 +2231,7 @@
                 const input = strat.makeInput(data.data, tw, th);
 
                 const opts = {
-                    inversionAttempts: 'attemptBoth',
+                    inversionAttempts: QR_INV_PRIMARY,
                     multi: true,
                     preBinarized: strat.preBinarized
                 };
@@ -2829,7 +3019,7 @@
                 if (useSauvola) {
                     const bin = buildSauvolaBinaryFromRGBA(frame.data, frame.width, frame.height, 0);
                     resList = jsQR(bin, frame.width, frame.height, {
-                        inversionAttempts: "attemptBoth",
+                        inversionAttempts: QR_INV_PRIMARY,
                         appEncMask: Array.from(appMask),
                         sysEncDecode: true,
                         multi: true,
@@ -2837,7 +3027,7 @@
                     });
                 } else {
                     resList = jsQR(frame.data, frame.width, frame.height, {
-                        inversionAttempts: "attemptBoth",
+                        inversionAttempts: QR_INV_PRIMARY,
                         appEncMask: Array.from(appMask),
                         sysEncDecode: true,
                         multi: true
@@ -5771,7 +5961,7 @@
                                 const _cropData = zxingCtx.getImageData(0, 0, _q2box.sw, _q2box.sh);
                                 markJsQrCropRect(_q2box.sx, _q2box.sy, _q2box.sw, _q2box.sh, 'フェーズ0.5 幾何クロップ');
                                 const _geoOpts = {
-                                    inversionAttempts: "attemptBoth",
+                                    inversionAttempts: QR_INV_PRIMARY,
                                     multi: true
                                 };
                                 if (sysEncStage3 || digitalSignStage3) _geoOpts.sysEncDecode = true;
@@ -5819,7 +6009,7 @@
                                     const _geoBin = buildSauvolaBinaryFromRGBA(_cropData.data, _q2box.sw, _q2box.sh, 0);
                                     recordJsQrInput('フェーズ0.5 幾何Sauvolaクロップ', 'crop');
                                     const _geoSauvolaOpts = {
-                                        inversionAttempts: "attemptBoth",
+                                        inversionAttempts: QR_INV_PRIMARY,
                                         multi: true,
                                         preBinarized: true,
                                         sysEncDecode: true
@@ -5873,7 +6063,7 @@
                     // 暗号化済み QR のデータを正しく復号できないが「位置検出」自体は通常QRと同様に高速に行える。
                     // → BarcodeDetector でクロップ位置を取得し、その小領域に対してのみ jsQR(sysEncDecode) を呼ぶ。
                     // 全画面 jsQR よりも数倍〜十倍程度高速化される（縦持ち/横持ち問わず効果大）。
-                    if (barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
+                    if (detectedItems.length === 0 && barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             recordBarcodeDetections('フェーズ1.0 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
@@ -5898,6 +6088,7 @@
                                     }
                                     if (_u) lastTwinBBox = _u;
                                 }
+                                // ★ P1: BD が位置を当てているので、クロップ復号を多二値化(標準→Sauvola→Otsu)で底上げ
                                 for (let i = 0; i < barcodes.length; i++) {
                                     const b = barcodes[i];
                                     const bbox = b.boundingBox;
@@ -5907,49 +6098,10 @@
                                     const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
                                     const sh = Math.min(video.videoHeight - sy, Math.ceil(bbox.height) + PADDING * 2);
                                     if (sw <= 0 || sh <= 0) continue;
-
-                                    zxingCanvas.width = sw;
-                                    zxingCanvas.height = sh;
-                                    zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-                                    const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                    markJsQrCropRect(sx, sy, sw, sh, 'フェーズ1.0 BarcodeDetectorクロップ');
-
-                                    const cropResList = jsQR(imgData.data, sw, sh, {
-                                        inversionAttempts: "attemptBoth",
-                                        sysEncDecode: true,
-                                        multi: true
-                                    });
-                                    if (cropResList && cropResList.length > 0) {
-                                        for (const cropRes of cropResList) {
-                                            if (cropRes && cropRes.data && !cropRes.isRaw) {
-                                                detectedItems.push({
-                                                    _debugInput: recordJsQrSuccess(),
-                                                    data: cropRes.data,
-                                                    managementCode: cropRes.managementCode,
-                                                    managementCode32: cropRes.managementCode32,
-                                                    managementFlags16: cropRes.managementFlags16,
-                                                    creationDateTimeExt32: cropRes.creationDateTimeExt32,
-                                                    managementExt32: cropRes.managementExt32,
-                                                    expiryExt32: cropRes.expiryExt32,
-                                                    readerIdExt32: cropRes.readerIdExt32,
-                                                    readLimitBits: cropRes.readLimitBits,
-                                                    qrTwinUniqueId8: cropRes.qrTwinUniqueId8,
-                                                    locationLatExt24: cropRes.locationLatExt24,
-                                                    locationLonExt24: cropRes.locationLonExt24,
-                                                    municipalityExt24: cropRes.municipalityExt24,
-                                                    codewords: cropRes.codewords,
-                                                    dataBytes: cropRes.dataBytes,
-                                                    versionNumber: cropRes.versionNumber,
-                                                    points: [
-                                                        { x: cropRes.location.topLeftCorner.x + sx, y: cropRes.location.topLeftCorner.y + sy },
-                                                        { x: cropRes.location.topRightCorner.x + sx, y: cropRes.location.topRightCorner.y + sy },
-                                                        { x: cropRes.location.bottomRightCorner.x + sx, y: cropRes.location.bottomRightCorner.y + sy },
-                                                        { x: cropRes.location.bottomLeftCorner.x + sx, y: cropRes.location.bottomLeftCorner.y + sy }
-                                                    ]
-                                                });
-                                            }
-                                        }
-                                    }
+                                    const moduleHint = Math.max(2, Math.floor(Math.min(sw, sh) / 37));
+                                    decodeCropIntoItems(detectedItems, sx, sy, sw, sh,
+                                        { sysEncDecode: true, multi: true },
+                                        'フェーズ1.0 BarcodeDetectorクロップ', moduleHint, (scanStage === 1 ? 0 : 1));
                                 }
                             }
                         } catch (err) { /* ignore native error */ }
@@ -5988,54 +6140,20 @@
                                         _twinBBoxSetThisIter = true;
                                     }
                                 }
+                                // ★ P1: 多二値化(標準→Sauvola→Otsu)でクロップ復号の歩留まりを底上げ
+                                //   （Stage1=第1QR/ Stage3通常=第2QR いずれも平文。復号規則どおり multi のみ）
                                 for (let i = 0; i < barcodes.length; i++) {
                                     const b = barcodes[i];
-
                                     const bbox = b.boundingBox;
                                     const PADDING = Math.max(50, Math.floor(bbox.width * 0.5));
                                     const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
                                     const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
                                     const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
                                     const sh = Math.min(video.videoHeight - sy, Math.ceil(bbox.height) + PADDING * 2);
-
-                                    zxingCanvas.width = sw;
-                                    zxingCanvas.height = sh;
-                                    zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-                                    const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                    markJsQrCropRect(sx, sy, sw, sh, 'フェーズ1 BarcodeDetectorクロップ');
-
-                                    const resList = jsQR(imgData.data, sw, sh, { inversionAttempts: "attemptBoth", multi: true });
-                                    if (resList && resList.length > 0) {
-                                        for (const res of resList) {
-                                            if (res && res.data && !res.isRaw) {
-                                                detectedItems.push({
-                                                    _debugInput: recordJsQrSuccess(),
-                                                    data: res.data,
-                                                    managementCode: res.managementCode,
-                                                    managementCode32: res.managementCode32,
-                                                    managementFlags16: res.managementFlags16,
-                                                    creationDateTimeExt32: res.creationDateTimeExt32,
-                                                    managementExt32: res.managementExt32,
-                                                    expiryExt32: res.expiryExt32,
-                                                    readerIdExt32: res.readerIdExt32,
-                                                    readLimitBits: res.readLimitBits,
-                                                    qrTwinUniqueId8: res.qrTwinUniqueId8,
-                                                    locationLatExt24: res.locationLatExt24,
-                                                    locationLonExt24: res.locationLonExt24,
-                                                    municipalityExt24: res.municipalityExt24,
-                                                    codewords: res.codewords,
-                                                    dataBytes: res.dataBytes,
-                                                    versionNumber: res.versionNumber,
-                                                    points: [
-                                                        { x: res.location.topLeftCorner.x + sx, y: res.location.topLeftCorner.y + sy },
-                                                        { x: res.location.topRightCorner.x + sx, y: res.location.topRightCorner.y + sy },
-                                                        { x: res.location.bottomRightCorner.x + sx, y: res.location.bottomRightCorner.y + sy },
-                                                        { x: res.location.bottomLeftCorner.x + sx, y: res.location.bottomLeftCorner.y + sy }
-                                                    ]
-                                                });
-                                            }
-                                        }
-                                    }
+                                    const moduleHint = Math.max(2, Math.floor(Math.min(sw, sh) / 37));
+                                    decodeCropIntoItems(detectedItems, sx, sy, sw, sh,
+                                        { multi: true },
+                                        'フェーズ1 BarcodeDetectorクロップ', moduleHint, (scanStage === 1 ? 0 : 1));
                                 }
                             }
                         } catch(err) { /* ignore Native Error */ }
@@ -6120,56 +6238,92 @@
                                         const dsh = Math.min(vh - dsy, Math.ceil(bb.height) + PADDING * 2);
                                         if (dsw <= 0 || dsh <= 0) continue;
 
-                                        // 元解像度（最大1920×1080）から高品質クロップしてデコード
-                                        zxingCanvas.width = dsw;
-                                        zxingCanvas.height = dsh;
-                                        zxingCtx.drawImage(video, dsx, dsy, dsw, dsh, 0, 0, dsw, dsh);
-                                        const imgData = zxingCtx.getImageData(0, 0, dsw, dsh);
-                                        markJsQrCropRect(dsx, dsy, dsw, dsh, 'フェーズ1.5 中央クロップBarcodeDetector');
-
-                                        const cropOpts = { inversionAttempts: "attemptBoth", multi: true };
+                                        // ★ P1: 復号規則どおりの baseOpts を組み、多二値化でクロップ復号（元解像度から再クロップ）
+                                        const baseOpts = { multi: true };
                                         if (scanStage === 3) {
-                                            if (appMask) { cropOpts.appEncMask = Array.from(appMask); cropOpts.sysEncDecode = true; }
-                                            else if (needSysEncForStage3 || needSysEncForDigitalSign) cropOpts.sysEncDecode = true;
+                                            if (appMask) { baseOpts.appEncMask = Array.from(appMask); baseOpts.sysEncDecode = true; }
+                                            else if (needSysEncForStage3 || needSysEncForDigitalSign) baseOpts.sysEncDecode = true;
                                         }
-                                        if (needSysEncForStage1) cropOpts.sysEncDecode = true;
-
-                                        const resList = jsQR(imgData.data, dsw, dsh, cropOpts);
-                                        if (resList && resList.length > 0) {
-                                            for (const res of resList) {
-                                                if (res && res.data && !res.isRaw) {
-                                                    detectedItems.push({
-                                                        _debugInput: recordJsQrSuccess(),
-                                                        data: res.data,
-                                                        managementCode: res.managementCode,
-                                                        managementCode32: res.managementCode32,
-                                                        managementFlags16: res.managementFlags16,
-                                                        creationDateTimeExt32: res.creationDateTimeExt32,
-                                                        managementExt32: res.managementExt32,
-                                                        expiryExt32: res.expiryExt32,
-                                                        readerIdExt32: res.readerIdExt32,
-                                                        readLimitBits: res.readLimitBits,
-                                                        qrTwinUniqueId8: res.qrTwinUniqueId8,
-                                                        locationLatExt24: res.locationLatExt24,
-                                                        locationLonExt24: res.locationLonExt24,
-                                                        municipalityExt24: res.municipalityExt24,
-                                                        codewords: res.codewords,
-                                                        dataBytes: res.dataBytes,
-                                                        versionNumber: res.versionNumber,
-                                                        points: [
-                                                            { x: res.location.topLeftCorner.x + dsx,     y: res.location.topLeftCorner.y + dsy },
-                                                            { x: res.location.topRightCorner.x + dsx,    y: res.location.topRightCorner.y + dsy },
-                                                            { x: res.location.bottomRightCorner.x + dsx, y: res.location.bottomRightCorner.y + dsy },
-                                                            { x: res.location.bottomLeftCorner.x + dsx,  y: res.location.bottomLeftCorner.y + dsy }
-                                                        ]
-                                                    });
-                                                }
-                                            }
-                                        }
+                                        if (needSysEncForStage1) baseOpts.sysEncDecode = true;
+                                        const moduleHint = Math.max(2, Math.floor(Math.min(dsw, dsh) / 37));
+                                        decodeCropIntoItems(detectedItems, dsx, dsy, dsw, dsh, baseOpts,
+                                            'フェーズ1.5 中央クロップBarcodeDetector', moduleHint, (scanStage === 1 ? 0 : 1));
                                     }
                                 }
                             } catch (err) { /* ignore */ }
                         }
+                    }
+
+                    // --- [フェーズ 1.6 / P0-3] ネイティブBD不発時の底上げ（二値化canvas・90°回転canvasへBD再投入） ---
+                    //   縦持ち等でネイティブBDが0件のとき、(a)Sauvola二値化 (b)90°回転 した縮小canvasを
+                    //   BarcodeDetector に与えて位置検出を取り直し、当たれば元解像度から多二値化でクロップ復号する。
+                    //   復号規則は各モード準拠（Stage1=第1QR平文 / sysenc等は対応フラグ）。
+                    if (detectedItems.length === 0 && barcodeDetector
+                        && (scanStage === 1 || (scanStage === 3 && (needSysEncForStage3 || needSysEncForDigitalSign || appMask || scanMode === 'normal')))) {
+                        try {
+                            const vw = video.videoWidth, vh = video.videoHeight;
+                            const FB_MAX = 1280;
+                            const fbScale = Math.min(1, FB_MAX / Math.max(vw, vh));
+                            const cw = Math.max(1, Math.round(vw * fbScale));
+                            const ch = Math.max(1, Math.round(vh * fbScale));
+                            const invS = 1 / fbScale;
+                            zxingCanvas.width = cw; zxingCanvas.height = ch;
+                            zxingCtx.drawImage(video, 0, 0, cw, ch);
+                            const baseRGBA = zxingCtx.getImageData(0, 0, cw, ch);
+
+                            if (!_bdAuxCanvas) {
+                                _bdAuxCanvas = document.createElement('canvas');
+                                _bdAuxCtx = _bdAuxCanvas.getContext('2d', { willReadFrequently: true });
+                            }
+                            // 当該クロップの復号オプション（モード規則どおり）
+                            const decOpts = { multi: true };
+                            if (scanStage === 3) {
+                                if (appMask) { decOpts.appEncMask = Array.from(appMask); decOpts.sysEncDecode = true; }
+                                else if (needSysEncForStage3 || needSysEncForDigitalSign) decOpts.sysEncDecode = true;
+                            }
+                            if (needSysEncForStage1) decOpts.sysEncDecode = true;
+
+                            const detectOnRGBA = async (rgba, w, h, label, mapBox) => {
+                                _bdAuxCanvas.width = w; _bdAuxCanvas.height = h;
+                                _bdAuxCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+                                let bcs = null;
+                                try { bcs = await barcodeDetector.detect(_bdAuxCanvas); } catch (e) { return; }
+                                recordBarcodeDetections(label, bcs ? bcs.length : 0);
+                                if (!bcs || !bcs.length) return;
+                                for (const b of bcs) {
+                                    if (!b || !b.boundingBox) continue;
+                                    const c = mapBox(b.boundingBox);
+                                    const PADDING = Math.max(50, Math.floor(c.w * 0.5));
+                                    const sx = Math.max(0, Math.floor(c.x) - PADDING);
+                                    const sy = Math.max(0, Math.floor(c.y) - PADDING);
+                                    const sw = Math.min(vw - sx, Math.ceil(c.w) + PADDING * 2);
+                                    const sh = Math.min(vh - sy, Math.ceil(c.h) + PADDING * 2);
+                                    const moduleHint = Math.max(2, Math.floor(Math.min(sw, sh) / 37));
+                                    decodeCropIntoItems(detectedItems, sx, sy, sw, sh, decOpts, label, moduleHint, (scanStage === 1 ? 0 : 1));
+                                    if (detectedItems.length > 0) break;
+                                }
+                            };
+
+                            // (a) Sauvola二値化canvas（コントラスト不足対策）
+                            const sb = buildSauvolaBinaryFromRGBA(baseRGBA.data, cw, ch, 0);
+                            const sbRGBA = new Uint8ClampedArray(cw * ch * 4);
+                            for (let i = 0, j = 0; i < sb.length; i++, j += 4) {
+                                const v = sb[i]; sbRGBA[j] = v; sbRGBA[j + 1] = v; sbRGBA[j + 2] = v; sbRGBA[j + 3] = 255;
+                            }
+                            await detectOnRGBA(sbRGBA, cw, ch, 'フェーズ1.6 二値化BD',
+                                (bb) => ({ x: bb.x * invS, y: bb.y * invS, w: bb.width * invS, h: bb.height * invS }));
+
+                            // (b) 90°回転canvas（方向性ノイズ・向き依存対策）
+                            if (detectedItems.length === 0) {
+                                const rot = rotateRGBA90(baseRGBA.data, cw, ch, 'cw');
+                                await detectOnRGBA(rot.data, rot.width, rot.height, 'フェーズ1.6 回転BD', (bb) => {
+                                    const p1 = unrotatePoint90(bb.x, bb.y, cw, ch, 'cw');
+                                    const p2 = unrotatePoint90(bb.x + bb.width, bb.y + bb.height, cw, ch, 'cw');
+                                    const rx1 = Math.min(p1.x, p2.x), ry1 = Math.min(p1.y, p2.y);
+                                    return { x: rx1 * invS, y: ry1 * invS, w: Math.abs(p2.x - p1.x) * invS, h: Math.abs(p2.y - p1.y) * invS };
+                                });
+                            }
+                        } catch (err) { /* ignore */ }
                     }
 
                     // --- [フェーズ 2] BarcodeDetector位置検出 + jsQRクロップ復号 (appMask専用ハイブリッド) ---
@@ -6181,6 +6335,7 @@
                             recordBarcodeDetections('フェーズ2 appMask BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             recordBarcodeBoxes('フェーズ2 appMask BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
+                                // ★ P1: ユーザ暗号化(appMask)も多二値化でクロップ復号を底上げ
                                 for (let i = 0; i < barcodes.length; i++) {
                                     const b = barcodes[i];
                                     const bbox = b.boundingBox;
@@ -6189,51 +6344,10 @@
                                     const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
                                     const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
                                     const sh = Math.min(video.videoHeight - sy, Math.ceil(bbox.height) + PADDING * 2);
-
-                                    zxingCanvas.width = sw;
-                                    zxingCanvas.height = sh;
-                                    zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-                                    const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                    markJsQrCropRect(sx, sy, sw, sh, 'フェーズ2 appMask BarcodeDetectorクロップ');
-
-                                    const cropResList = jsQR(imgData.data, sw, sh, {
-                                        inversionAttempts: "attemptBoth",
-                                        appEncMask: Array.from(appMask),
-                                        sysEncDecode: true,
-                                        multi: true
-                                    });
-
-                                    if (cropResList && cropResList.length > 0) {
-                                        for (const cropRes of cropResList) {
-                                            if (cropRes && cropRes.data && !cropRes.isRaw) {
-                                                detectedItems.push({
-                                                    _debugInput: recordJsQrSuccess(),
-                                                    data: cropRes.data,
-                                                    managementCode: cropRes.managementCode,
-                                                    managementCode32: cropRes.managementCode32,
-                                                    managementFlags16: cropRes.managementFlags16,
-                                                    creationDateTimeExt32: cropRes.creationDateTimeExt32,
-                                                    managementExt32: cropRes.managementExt32,
-                                                    expiryExt32: cropRes.expiryExt32,
-                                                    readerIdExt32: cropRes.readerIdExt32,
-                                                    readLimitBits: cropRes.readLimitBits,
-                                                    qrTwinUniqueId8: cropRes.qrTwinUniqueId8,
-                                                    locationLatExt24: cropRes.locationLatExt24,
-                                                    locationLonExt24: cropRes.locationLonExt24,
-                                                    municipalityExt24: cropRes.municipalityExt24,
-                                                    codewords: cropRes.codewords,
-                                                    dataBytes: cropRes.dataBytes,
-                                                    versionNumber: cropRes.versionNumber,
-                                                    points: [
-                                                        { x: cropRes.location.topLeftCorner.x + sx, y: cropRes.location.topLeftCorner.y + sy },
-                                                        { x: cropRes.location.topRightCorner.x + sx, y: cropRes.location.topRightCorner.y + sy },
-                                                        { x: cropRes.location.bottomRightCorner.x + sx, y: cropRes.location.bottomRightCorner.y + sy },
-                                                        { x: cropRes.location.bottomLeftCorner.x + sx, y: cropRes.location.bottomLeftCorner.y + sy }
-                                                    ]
-                                                });
-                                            }
-                                        }
-                                    }
+                                    const moduleHint = Math.max(2, Math.floor(Math.min(sw, sh) / 37));
+                                    decodeCropIntoItems(detectedItems, sx, sy, sw, sh,
+                                        { appEncMask: Array.from(appMask), sysEncDecode: true, multi: true },
+                                        'フェーズ2 appMask BarcodeDetectorクロップ', moduleHint, 1);
                                 }
                             }
                         } catch(err) { /* ignore */ }
@@ -6267,7 +6381,7 @@
                             markJsQrCropRect(sx, sy, sw, sh, 'フェーズ2.5 lastTwinBBoxクロップ');
 
                             const cropOpts = {
-                                inversionAttempts: "attemptBoth",
+                                inversionAttempts: QR_INV_PRIMARY,
                                 multi: true
                             };
                             if (appMask) {
@@ -6344,7 +6458,7 @@
                             const sauvolaBin = buildSauvolaBinaryFromRGBA(imgData.data, sw, sh, moduleHint);
 
                             const cropOpts = {
-                                inversionAttempts: "attemptBoth",
+                                inversionAttempts: QR_INV_PRIMARY,
                                 multi: true,
                                 preBinarized: true
                             };
@@ -6396,6 +6510,8 @@
                     // 十分に検出/復号でき、約 25〜35ms で完了する → 縦/横どちらの持ち方でも
                     // BarcodeDetector がミスった時のフォールバック速度が劇的に向上する。
                     // 失敗時のみフェーズ3（フル解像度フルフレーム）に進む。
+                    // ★ P0-1(b): 全画面フォールバックに入るフレームだけカウンタを進め、2.8/3を交互実行
+                    if (detectedItems.length === 0) { fullScanFrameIdx++; }
                     if (detectedItems.length === 0) {
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
@@ -6411,7 +6527,7 @@
                             zxingCtx.drawImage(video, 0, 0, tw, th);
                             const fastData = zxingCtx.getImageData(0, 0, tw, th);
 
-                            const fastOpts = { inversionAttempts: "attemptBoth" };
+                            const fastOpts = { inversionAttempts: QR_INV_PRIMARY };
                             if (scanStage === 3) {
                                 if (appMask) {
                                     fastOpts.appEncMask = Array.from(appMask);
@@ -6472,7 +6588,8 @@
                     //   ・SECOM ロゴや地紋がコントラストを乱している
                     //   ・低照度で全体が灰色に潰れている
                     // 等のケースを救済する。半解像度（≒1/4 画素）で動かすので約 5–10ms で完走する。
-                    if (detectedItems.length === 0) {
+                    // ★ P0-1(b): 2.8(Sauvola全画面) は偶数フレームのみ実行
+                    if (detectedItems.length === 0 && (fullScanFrameIdx % 2 === 0)) {
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const ADAPT_MAX_DIM = 960;
@@ -6488,7 +6605,7 @@
                         // 移動平均（3x3）→ Sauvola 二値化（紙印刷の低コントラスト QR にも強い）
                         const adaptBin = buildSauvolaBinaryFromRGBA(adaptRGBA.data, tw, th, 0);
 
-                        const adaptOpts = { inversionAttempts: "attemptBoth", preBinarized: true };
+                        const adaptOpts = { inversionAttempts: QR_INV_PRIMARY, preBinarized: true };
                         if (scanStage === 3) {
                             if (appMask) {
                                 adaptOpts.appEncMask = Array.from(appMask);
@@ -6541,13 +6658,14 @@
                     }
 
                     // --- [フェーズ 3 / Fallback] Custom jsQR Full-Screen Scan ---
-                    if (detectedItems.length === 0) {
+                    // ★ P0-1(b): フル解像度パスは奇数フレームのみ（2.8と交互）。反転試行は残し誤印刷も拾う。
+                    if (detectedItems.length === 0 && (fullScanFrameIdx % 2 === 1)) {
                         zxingCanvas.width = overlayCanvas.width;
                         zxingCanvas.height = overlayCanvas.height;
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
                         const fullData = zxingCtx.getImageData(0, 0, zxingCanvas.width, zxingCanvas.height);
 
-                        const opts = { inversionAttempts: "attemptBoth" };
+                        const opts = { inversionAttempts: QR_INV_BOTH };
 
                         if (scanStage === 3) {
                             if (appMask) {
@@ -6844,6 +6962,20 @@
                                 } else {
                                     scanStage = 3;
                                     statusText.innerText = "第2QRを探索中...";
+                                    // ★ P0-2: 通常(非暗号)ツインも、第1QR検出と同フレームで第2QRを多変種プリロケート
+                                    //   （復号規則どおり平文。外れたら従来どおり Stage3 ループで継続）
+                                    recordImmediatePrelocate(true, false, 'normal plain');
+                                    const _q2PreN = preLocateQ2SysEncLegacy({});
+                                    if (_q2PreN) {
+                                        recordImmediatePrelocate(false, true, 'normal plain');
+                                        secondQR = _q2PreN;
+                                        isScanning = false;
+                                        isProcessing = false;
+                                        showResultScreen();
+                                        return;
+                                    } else {
+                                        recordImmediatePrelocate(false, false, 'normal plain');
+                                    }
                                 }
                             } else {
                                 // 二重暗号化モード
