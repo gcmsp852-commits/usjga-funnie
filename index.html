@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader17</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -113,6 +113,14 @@
                 <button class="btn sys-enc" id="digitalSignModeBtn">電子署名モード</button>
                 <button class="btn" id="colorEncModeBtn" style="background-color:#00897B; display:none;">カラー符号化モード</button>
                 <button class="btn secondary" id="logoutBtn" style="margin-top:10px; font-size:0.9rem;">端末情報を変更</button>
+                <!-- ★ 読取向き（縦/横）選択。押す度に切替。デフォルト=縦向き -->
+                <button class="btn secondary" id="orientationBtn" style="margin-top:10px; font-size:0.9rem; background-color:#1565c0; border-color:#1976d2;" onclick="toggleReadOrientation()">読取向き: 縦向き</button>
+                <!-- ★ 読取デバッグログ（蓄積）操作 -->
+                <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
+                    <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px;" onclick="copyAllDebugLog()">デバッグログコピー</button>
+                    <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; background-color:#7f1d1d; border-color:#a33;" onclick="confirmClearDebugLog()">デバッグログ削除</button>
+                </div>
+                <div id="debugLogCountLabel" style="margin-top:6px; font-size:0.8rem; color:#aaa;">蓄積ログ 0 件</div>
             </div>
         </div>
     </div>
@@ -130,6 +138,16 @@
                 端末情報を記憶する
             </label>
             <button class="btn" onclick="doLogin()">登録</button>
+        </div>
+    </div>
+
+    <!-- デバッグログ削除 確認モーダル -->
+    <div class="overlay-screen" id="debugClearModal" style="display:none;">
+        <div class="overlay-box">
+            <h2 style="color:#ff5252;">デバッグログを消去します</h2>
+            <p>蓄積した読取デバッグ情報を全て消去します。<br>よろしいですか？</p>
+            <button class="btn" style="background-color:#7f1d1d; border-color:#a33;" onclick="doClearDebugLog()">はい、消去する</button>
+            <button class="btn secondary" onclick="cancelClearDebugLog()">いいえ</button>
         </div>
     </div>
 
@@ -820,6 +838,25 @@
         // ★ P0-3: ネイティブBD不発時の補助検出（回転/二値化canvas）用オフスクリーン
         let _bdAuxCanvas = null, _bdAuxCtx = null;
 
+        // ★ 読取向き（手動選択）。デフォルト=縦向き。トップ画面のボタンで切替え、localStorage に保持。
+        const READ_ORIENT_KEY = 'QR_READ_ORIENTATION';
+        let readOrientationManual = 'portrait';
+        try {
+            const _o = localStorage.getItem(READ_ORIENT_KEY);
+            if (_o === 'portrait' || _o === 'landscape') readOrientationManual = _o;
+        } catch (e) { /* ignore */ }
+        function orientationLabel(o) { return (o === 'landscape') ? '横向き' : '縦向き'; }
+        function updateOrientationBtnUI() {
+            const btn = document.getElementById('orientationBtn');
+            if (btn) btn.textContent = '読取向き: ' + orientationLabel(readOrientationManual);
+        }
+        function toggleReadOrientation() {
+            readOrientationManual = (readOrientationManual === 'portrait') ? 'landscape' : 'portrait';
+            try { localStorage.setItem(READ_ORIENT_KEY, readOrientationManual); } catch (e) { /* ignore */ }
+            updateOrientationBtnUI();
+            if (typeof statusText !== 'undefined' && statusText) statusText.innerText = '読取向きを「' + orientationLabel(readOrientationManual) + '」にしました';
+        }
+
         // ============================================================
         //  ★ QRツイン識別ロジック（第2QR の判定強化）
         //  ZXing 版と同一の「テキスト差 OR 中心座標距離」による判定。
@@ -1242,6 +1279,9 @@
                 geometryCrops: [],
                 q2Centers: [],
                 barcodeBoxes: [],
+                qrMeta: {},          // ★ P3: 第1/第2QRのメタ（種類・version・mask・EC・配置パターン）
+                prelocateWin: null,  // ★ P3: 即時プリロケートが当たった変種(スケール×二値化×回転)
+                readOrientation: (typeof readOrientationManual !== 'undefined' ? readOrientationManual : 'portrait'), // ★ 手動選択の読取向き
                 immediatePrelocate: {
                     attempted: 0,
                     success: 0,
@@ -1268,7 +1308,9 @@
                     barcodeDetections: 0,
                     cropJsQrCalls: 0,
                     fullJsQrCalls: 0,
-                    successCount: 0
+                    successCount: 0,
+                    jsqrMs: 0,   // ★ P3: このフェーズの jsQR 復号に費やした累計ms
+                    bdMs: 0      // ★ P3: このフェーズの BarcodeDetector 検出に費やした累計ms
                 };
             }
             return stats.stages[stageKey].phases[phaseKey];
@@ -1278,6 +1320,23 @@
             const phaseStats = getPhaseDebugStats(stage, phase);
             phaseStats.barcodeDetectCalls += 1;
             phaseStats.barcodeDetections += Math.max(0, Number(count) || 0);
+        }
+
+        // ★ P3: フェーズ別の経過ms を加算（kind: 'jsqr' | 'bd'）
+        function addPhaseElapsed(stage, phase, ms, kind) {
+            if (!(ms >= 0)) return;
+            const phaseStats = getPhaseDebugStats(stage, phase);
+            if (kind === 'bd') phaseStats.bdMs += ms;
+            else phaseStats.jsqrMs += ms;
+        }
+
+        // ★ P3: BarcodeDetector.detect を時間計測つきで呼ぶ（フェーズ別 bdMs に加算）
+        async function timedDetect(phase, source, stage = scanStage) {
+            const t0 = nowPerf();
+            let r = null;
+            try { r = await barcodeDetector.detect(source); }
+            finally { addPhaseElapsed(stage, phase, nowPerf() - t0, 'bd'); }
+            return r;
         }
 
         function fmtNum(v) {
@@ -1441,11 +1500,30 @@
                 try { if (typeof secondQR !== 'undefined' && secondQR && secondQR.points) q2ang = computeTiltAngleDeg(secondQR.points); } catch (e) {}
             }
             const fmtAng = (a) => (a == null || !Number.isFinite(a)) ? '-' : a.toFixed(1) + '° (' + classifyOrientation(a) + ')';
+            lines.push('読取向き(手動選択): ' + orientationLabel(stats.readOrientation || 'portrait'));
             lines.push('第1QR傾き角: ' + fmtAng(q1ang));
             lines.push('第2QR傾き角: ' + fmtAng(q2ang));
 
             lines.push('第1QRの4角座標: ' + (stats.qr1Corners ? stats.qr1Corners.map(fmtPoint).join(' ') : '-'));
             lines.push('即時プリロケート: ' + `試行 ${stats.immediatePrelocate.attempted}回 / 成功 ${stats.immediatePrelocate.success}回` + (stats.immediatePrelocate.last ? ` / 最後=${stats.immediatePrelocate.last.success ? '成功' : '失敗'} ${stats.immediatePrelocate.last.detail || ''}` : '') + (stats.immediatePrelocate.lastReason ? ` / 理由=${stats.immediatePrelocate.lastReason}` : ''));
+            lines.push('プリロケート当たり変種: ' + (stats.prelocateWin || '-'));
+
+            // ── P3計測: QRツイン種別 & セル配置パターン（同種別でも遅い配置の特定用） ──
+            const fmtPattern = (m) => {
+                if (!m) return '-';
+                const pat = m.pattern;
+                let s = m.type || '-';
+                if (m.mgmtCode32) s += ' | mgmt=' + m.mgmtCode32;
+                if (pat) {
+                    s += ' | v' + pat.version + '/mask' + pat.mask + '/EC=' + pat.ec;
+                    if (pat.fp) s += ' | 配置fp=' + pat.fp + ' dark=' + Math.round((pat.darkRatio || 0) * 100) + '% runH=' + pat.maxRunH + ' runV=' + pat.maxRunV;
+                    if (pat.codewordsLen != null) s += ' | CW長=' + pat.codewordsLen;
+                    if (pat.dataLen != null) s += ' | data長=' + pat.dataLen;
+                }
+                return s;
+            };
+            lines.push('第1QR種別/配置: ' + fmtPattern(stats.qrMeta && stats.qrMeta['0']));
+            lines.push('第2QR種別/配置: ' + fmtPattern(stats.qrMeta && stats.qrMeta['1']));
             lines.push('');
             lines.push('幾何クロップ sx, sy, sw, sh');
             if (stats.geometryCrops.length) {
@@ -1487,7 +1565,8 @@
                     lines.push(
                         `  ${phaseKey}\n` +
                         `    BarcodeDetector: 検出 ${p.barcodeDetections}個 / 呼出 ${p.barcodeDetectCalls}回\n` +
-                        `    jsQR: crop ${p.cropJsQrCalls}回 / full ${p.fullJsQrCalls}回 / 成功 ${p.successCount}回`
+                        `    jsQR: crop ${p.cropJsQrCalls}回 / full ${p.fullJsQrCalls}回 / 成功 ${p.successCount}回\n` +
+                        `    所要: jsQR ${Math.round(p.jsqrMs || 0)}ms / BD ${Math.round(p.bdMs || 0)}ms`
                     );
                 }
             };
@@ -1536,6 +1615,152 @@
                 statusText.innerText = 'コピーに失敗しました';
             }
         }
+
+        // ============================================================
+        //  ★ 読取デバッグ情報の「蓄積」（試行をまたいで保持）
+        //    localStorage に試行毎のレコードを追記。トップ画面の
+        //    「デバッグログコピー」で全件コピー、「デバッグログ削除」で消去。
+        // ============================================================
+        const DEBUG_LOG_KEY = 'QR_DEBUG_LOG_V1';
+        const DEBUG_LOG_MAX = 500; // 上限件数（古いものから破棄）
+
+        function loadDebugLog() {
+            try { const s = localStorage.getItem(DEBUG_LOG_KEY); return s ? (JSON.parse(s) || []) : []; }
+            catch (e) { return []; }
+        }
+        function saveDebugLog(arr) {
+            try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(arr)); } catch (e) { /* quota等は無視 */ }
+        }
+        function getDebugLogCount() { return loadDebugLog().length; }
+
+        function updateDebugLogCountUI() {
+            const el = document.getElementById('debugLogCountLabel');
+            if (el) el.textContent = '蓄積ログ ' + getDebugLogCount() + ' 件';
+        }
+
+        // 現在の読取（1試行）の計測を、蓄積ログへ1レコード追記する。
+        // 完了画面表示時に呼ぶ。二重追記は _logged フラグで防止。
+        function appendCurrentTrialToLog() {
+            const stats = getScanDebugStats();
+            if (!stats || stats._logged) return;
+            // 一度も検出処理を回していない試行は記録しない
+            if (!stats.frames || !stats.frames.total) { stats._logged = true; return; }
+            stats._logged = true;
+            const log = loadDebugLog();
+            const lastId = log.length ? (log[log.length - 1].id || log.length) : 0;
+            const id = lastId + 1;
+            const ts = new Date();
+            const tsStr = ts.getFullYear() + '-' + String(ts.getMonth() + 1).padStart(2, '0') + '-' + String(ts.getDate()).padStart(2, '0')
+                + ' ' + String(ts.getHours()).padStart(2, '0') + ':' + String(ts.getMinutes()).padStart(2, '0') + ':' + String(ts.getSeconds()).padStart(2, '0');
+            const orient = stats.readOrientation || 'portrait';
+            const header = '========== 試行 #' + id + ' / ' + tsStr + ' / mode=' + scanMode + ' / 向き=' + orientationLabel(orient) + ' ==========';
+            const rec = {
+                id,
+                ts: ts.toISOString(),
+                mode: scanMode,
+                orientation: orient,
+                secondSuccessMs: (stats.secondSuccessAt != null) ? Math.round(stats.secondSuccessAt) : null,
+                firstSuccessMs: (stats.firstSuccessAt != null) ? Math.round(stats.firstSuccessAt) : null,
+                framesTotal: stats.frames.total,
+                q1Type: (stats.qrMeta && stats.qrMeta['0']) ? stats.qrMeta['0'].type : null,
+                q2Type: (stats.qrMeta && stats.qrMeta['1']) ? stats.qrMeta['1'].type : null,
+                q1Fp: (stats.qrMeta && stats.qrMeta['0'] && stats.qrMeta['0'].pattern) ? stats.qrMeta['0'].pattern.fp : null,
+                q2Fp: (stats.qrMeta && stats.qrMeta['1'] && stats.qrMeta['1'].pattern) ? stats.qrMeta['1'].pattern.fp : null,
+                prelocateWin: stats.prelocateWin || null,
+                text: header + '\n' + formatScanDebugStats()
+            };
+            log.push(rec);
+            while (log.length > DEBUG_LOG_MAX) log.shift();
+            saveDebugLog(log);
+            updateDebugLogCountUI();
+        }
+
+        // 蓄積ログ全体を1テキストへ（先頭に集計サマリ）
+        function formatAccumulatedDebugLog() {
+            const log = loadDebugLog();
+            if (!log.length) return 'デバッグログは空です。';
+            const lines = [];
+            lines.push('■ 読取デバッグログ（蓄積）');
+            lines.push('件数: ' + log.length + ' / 出力: ' + new Date().toISOString());
+            // 簡易集計：種別×平均第2QR確定ms、配置fp×平均ms（遅い配置の発見用）
+            const agg = {};
+            for (const r of log) {
+                const key = (r.q2Type || r.q1Type || '不明');
+                if (!agg[key]) agg[key] = { n: 0, sum: 0 };
+                if (r.secondSuccessMs != null) { agg[key].n++; agg[key].sum += r.secondSuccessMs; }
+            }
+            lines.push('— 種別別の平均 第2QR確定ms —');
+            Object.keys(agg).forEach(k => {
+                const a = agg[k];
+                lines.push('  ' + k + ': n=' + a.n + ' avg=' + (a.n ? Math.round(a.sum / a.n) : '-') + 'ms');
+            });
+            // 読取向き別（手動選択）× 第2QR確定ms（縦横差の確認用）
+            const oAgg = {};
+            for (const r of log) {
+                const ok = orientationLabel(r.orientation || 'portrait');
+                if (!oAgg[ok]) oAgg[ok] = { n: 0, sum: 0, cnt: 0 };
+                oAgg[ok].cnt++;
+                if (r.secondSuccessMs != null) { oAgg[ok].n++; oAgg[ok].sum += r.secondSuccessMs; }
+            }
+            lines.push('— 読取向き別(手動選択)の平均 第2QR確定ms —');
+            Object.keys(oAgg).forEach(k => {
+                const a = oAgg[k];
+                lines.push('  ' + k + ': 試行' + a.cnt + '件 / n=' + a.n + ' avg=' + (a.n ? Math.round(a.sum / a.n) : '-') + 'ms');
+            });
+            // 配置fp別（遅い配置パターン検出）
+            const fpAgg = {};
+            for (const r of log) {
+                const fp = r.q2Fp || r.q1Fp; if (!fp) continue;
+                if (!fpAgg[fp]) fpAgg[fp] = { n: 0, sum: 0 };
+                if (r.secondSuccessMs != null) { fpAgg[fp].n++; fpAgg[fp].sum += r.secondSuccessMs; }
+            }
+            const fpRows = Object.keys(fpAgg).map(fp => ({ fp, n: fpAgg[fp].n, avg: fpAgg[fp].n ? Math.round(fpAgg[fp].sum / fpAgg[fp].n) : null }))
+                .filter(x => x.avg != null).sort((a, b) => b.avg - a.avg);
+            if (fpRows.length) {
+                lines.push('— 配置fp別の平均 第2QR確定ms（遅い順 上位20） —');
+                fpRows.slice(0, 20).forEach(x => lines.push('  fp=' + x.fp + ': n=' + x.n + ' avg=' + x.avg + 'ms'));
+            }
+            lines.push('========================================');
+            lines.push('');
+            for (const rec of log) { lines.push(rec.text); lines.push(''); }
+            return lines.join('\n');
+        }
+
+        async function copyAllDebugLog() {
+            const text = formatAccumulatedDebugLog();
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+                    document.body.appendChild(ta); ta.focus(); ta.select();
+                    document.execCommand('copy'); document.body.removeChild(ta);
+                }
+                if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'デバッグログ(' + getDebugLogCount() + '件)をコピーしました';
+            } catch (e) {
+                if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'コピーに失敗しました';
+            }
+        }
+
+        // 削除（誤操作防止のため確認モーダルを経由）
+        function confirmClearDebugLog() {
+            const m = document.getElementById('debugClearModal');
+            if (m) m.style.display = 'flex';
+        }
+        function cancelClearDebugLog() {
+            const m = document.getElementById('debugClearModal');
+            if (m) m.style.display = 'none';
+        }
+        function doClearDebugLog() {
+            saveDebugLog([]);
+            updateDebugLogCountUI();
+            cancelClearDebugLog();
+            if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'デバッグログを消去しました';
+        }
+        // 起動時に蓄積件数・読取向きボタンを初期化
+        try { updateDebugLogCountUI(); updateOrientationBtnUI(); } catch (e) { /* DOM未準備なら load で */ }
+        window.addEventListener('load', function () { try { updateDebugLogCountUI(); updateOrientationBtnUI(); } catch (e) {} });
 
         function drawJsQrCropDebugRects() {
             const now = Date.now();
@@ -1868,6 +2093,7 @@
             const L = res.location;
             return {
                 _debugInput: debugInput !== undefined ? debugInput : null,
+                patternInfo: buildPatternInfo(res),
                 data: res.data,
                 managementCode: res.managementCode,
                 managementCode32: res.managementCode32,
@@ -1893,6 +2119,94 @@
             };
         }
 
+        // ★ P3: jsQRの復号結果から「セル配置パターン情報」を抽出する。
+        //   version/mask/EC に加え、モジュール行列の暗率・最大連長・指紋ハッシュを記録。
+        //   同種別・同versionでも Q1 の文字が変わると行列が変わり、読みにくい配置を識別できる。
+        function buildPatternInfo(res) {
+            if (!res) return null;
+            const fi = res.formatInfo || null;
+            const info = {
+                version: (res.versionNumber !== undefined && res.versionNumber !== null) ? res.versionNumber : null,
+                mask: fi ? fi.dataMask : null,
+                ecRaw: fi ? fi.errorCorrectionLevel : null,
+                // QR format info の EC 2bit: 0=M,1=L,2=H,3=Q
+                ec: fi ? (['M', 'L', 'H', 'Q'][fi.errorCorrectionLevel] || '?') : '?',
+                codewordsLen: res.codewords ? res.codewords.length : (res.dataBytes ? res.dataBytes.length : null),
+                dataLen: (typeof res.data === 'string') ? res.data.length : null
+            };
+            const m = res.matrix;
+            if (m && m.data && m.width) {
+                const w = m.width, h = m.height, d = m.data;
+                let dark = 0, maxRunH = 0, maxRunV = 0;
+                for (let y = 0; y < h; y++) {
+                    let run = 0, prev = -1;
+                    const base = y * w;
+                    for (let x = 0; x < w; x++) {
+                        const v = d[base + x] ? 1 : 0;
+                        dark += v;
+                        if (v === prev) run++; else { run = 1; prev = v; }
+                        if (run > maxRunH) maxRunH = run;
+                    }
+                }
+                for (let x = 0; x < w; x++) {
+                    let run = 0, prev = -1;
+                    for (let y = 0; y < h; y++) {
+                        const v = d[y * w + x] ? 1 : 0;
+                        if (v === prev) run++; else { run = 1; prev = v; }
+                        if (run > maxRunV) maxRunV = run;
+                    }
+                }
+                let hsh = 0x811c9dc5; // FNV-1a（モジュール配置の指紋。同一配置→同一値）
+                for (let i = 0; i < d.length; i++) { hsh ^= (d[i] ? 1 : 0); hsh = (hsh * 0x01000193) >>> 0; }
+                info.modN = w;
+                info.dark = dark;
+                info.darkRatio = +(dark / (w * h)).toFixed(3);
+                info.maxRunH = maxRunH;
+                info.maxRunV = maxRunV;
+                info.fp = ('00000000' + hsh.toString(16)).slice(-8);
+            }
+            return info;
+        }
+
+        // ★ P3: 管理ビットから QRツインの種類ラベルを作る（分析用の分類キー）
+        function qrTypeLabel(mgmtInfo, modeHint) {
+            if (!mgmtInfo) return (modeHint === 'digital_sign') ? '電子署名' : '不明';
+            const parts = [];
+            if (mgmtInfo.sysEncFlag) parts.push('システム暗号化');
+            else if (mgmtInfo.appEncFlag) parts.push('ユーザ暗号化');
+            else parts.push('ノーマル');
+            if (modeHint === 'digital_sign') parts.push('電子署名');
+            if (mgmtInfo.sameDataFlag) parts.push('同一データ');
+            if (mgmtInfo.hasDateTime) parts.push('作成日時');
+            if (mgmtInfo.hasExpiry) parts.push('読取期限');
+            if (mgmtInfo.hasReaderId) parts.push('読取端末ID');
+            if (mgmtInfo.hasImageId) parts.push('画像ID');
+            if (mgmtInfo.hasLocation) parts.push('読取位置');
+            if (mgmtInfo.hasMunicipality) parts.push('市町村コード');
+            if (mgmtInfo.readLimitBits) parts.push('読取回数(' + mgmtInfo.readLimitBits + ')');
+            return parts.join('+');
+        }
+
+        // ★ P3: 第1/第2QRのメタ情報を計測へ記録（item は detectedItems 要素 or プリロケート結果）
+        function recordQrMeta(qrNo, item, modeHint) {
+            if (!(qrNo === 0 || qrNo === 1) || !item) return;
+            const mc32 = (item.managementCode32 !== undefined && item.managementCode32 !== null)
+                ? (item.managementCode32 >>> 0)
+                : getManagementCode32FromParts(item.managementCode, item.managementFlags16);
+            const mgmtInfo = parseStandardMgmt(mc32);
+            const stats = getScanDebugStats();
+            stats.qrMeta[String(qrNo)] = {
+                type: qrTypeLabel(mgmtInfo, modeHint),
+                mgmtCode32: (mc32 !== null && mc32 !== undefined) ? ('0x' + (mc32 >>> 0).toString(16)) : null,
+                pattern: item.patternInfo || null,
+                hasDateTime: !!(mgmtInfo && mgmtInfo.hasDateTime),
+                hasExpiry: !!(mgmtInfo && mgmtInfo.hasExpiry),
+                hasLocation: !!(mgmtInfo && mgmtInfo.hasLocation),
+                hasMunicipality: !!(mgmtInfo && mgmtInfo.hasMunicipality),
+                readLimitBits: mgmtInfo ? mgmtInfo.readLimitBits : null
+            };
+        }
+
         // ★ 指定矩形(元動画座標)を切り出し、標準→Sauvola→Otsu の多二値化で復号して
         //   detectedItems に積む共通ルーチン（P1：BD位置検出の復号歩留まりを底上げ）。
         //   baseOpts はモード規則どおりの {sysEncDecode, appEncMask, multi}。
@@ -1906,7 +2220,9 @@
             zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
             const imgData = zxingCtx.getImageData(0, 0, sw, sh);
             markJsQrCropRect(sx, sy, sw, sh, label); // crop計測＋デバッグ矩形
+            const _t0 = nowPerf();
             const list = jsqrMultiBin(imgData.data, sw, sh, baseOpts, moduleHint || 0, wantQrNo);
+            addPhaseElapsed(scanStage, label, nowPerf() - _t0, 'jsqr');
             let pushed = false;
             for (const res of list) {
                 if (!res || !res.data || res.isRaw) continue;
@@ -1994,19 +2310,21 @@
             let sawRaw = false, sawOther = false;
 
             // 与えられたRGBAに対し 標準→Sauvola→Otsu を試し、qrNo===1 を見つけたら Q2 を返す。
-            // mapPt(x,y): その画像座標を元動画座標へ写す関数。
-            const tryDecode = (rgba, w, h, mapPt) => {
+            // mapPt(x,y): その画像座標を元動画座標へ写す関数。 scaleTag/rotTag: 当たった変種の記録用。
+            const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag) => {
                 const variants = [
-                    { d: rgba, pre: false },
-                    { d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true },
-                    { d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true }
+                    { name: 'native', d: rgba, pre: false },
+                    { name: 'sauvola', d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true },
+                    { name: 'otsu', d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true }
                 ];
                 for (const v of variants) {
                     recordJsQrInput('即時プリロケート 多変種全画面jsQR', 'full');
+                    const _tp = nowPerf();
                     let r = null;
                     try {
                         r = jsQR(v.d, w, h, Object.assign({}, baseOpts, { inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre }));
-                    } catch (e) { continue; }
+                    } catch (e) { addPhaseElapsed(scanStage, '即時プリロケート 多変種全画面jsQR', nowPerf() - _tp, 'jsqr'); continue; }
+                    addPhaseElapsed(scanStage, '即時プリロケート 多変種全画面jsQR', nowPerf() - _tp, 'jsqr');
                     if (r && !Array.isArray(r)) r = [r];
                     if (!r) continue;
                     for (const res of r) {
@@ -2018,6 +2336,8 @@
                         const info = parseStandardMgmt(mc32);
                         if (!info || info.qrNo !== 1) { sawOther = true; continue; }
                         recordPrelocateReason('成功');
+                        // ★ P3: 当たった変種（スケール×二値化×回転）を記録
+                        getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + v.name + ', rot=' + rotTag;
                         recordJsQrSuccess(1);
                         const L = res.location;
                         const pts = [
@@ -2029,6 +2349,7 @@
                         return {
                             text: res.data,
                             data: res.data,
+                            patternInfo: buildPatternInfo(res),
                             managementCode: res.managementCode,
                             managementCode32: res.managementCode32,
                             managementFlags16: res.managementFlags16,
@@ -2043,6 +2364,7 @@
                             municipalityExt24: res.municipalityExt24,
                             codewords: res.codewords,
                             dataBytes: res.dataBytes,
+                            versionNumber: res.versionNumber,
                             points: pts,
                             center: computeCenterFromPoints(pts)
                         };
@@ -2062,7 +2384,7 @@
                 zxingCtx.drawImage(video, 0, 0, tw, th);
                 const data = zxingCtx.getImageData(0, 0, tw, th);
                 const inv = 1 / scale;
-                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }));
+                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }), maxDim, 0);
                 if (hit) return hit;
 
                 // 回転バリアント（960スケール時のみ：方向性ノイズ対策の保険）
@@ -2071,7 +2393,7 @@
                     const hitR = tryDecode(rot.data, rot.width, rot.height, (rx, ry) => {
                         const p = unrotatePoint90(rx, ry, tw, th, 'cw');
                         return { x: p.x * inv, y: p.y * inv };
-                    });
+                    }, maxDim, 90);
                     if (hitR) return hitR;
                 }
             }
@@ -3463,6 +3785,7 @@
             }
 
             renderScanDebugStats();
+            appendCurrentTrialToLog(); // ★ この試行の計測を蓄積ログへ追記（完了時1回）
             document.getElementById('resultScreen').style.display = 'flex';
         }
 
@@ -5978,6 +6301,7 @@
                                         if (_info && _info.qrNo === 1) {
                                             detectedItems.push({
                                                 _debugInput: recordJsQrSuccess(),
+                                                patternInfo: buildPatternInfo(_it),
                                                 data: _it.data,
                                                 managementCode: _it.managementCode,
                                                 managementCode32: _it.managementCode32,
@@ -6065,7 +6389,7 @@
                     // 全画面 jsQR よりも数倍〜十倍程度高速化される（縦持ち/横持ち問わず効果大）。
                     if (detectedItems.length === 0 && barcodeDetector && (needSysEncForStage1 || needSysEncForStage3 || needSysEncForDigitalSign)) {
                         try {
-                            const barcodes = await barcodeDetector.detect(video);
+                            const barcodes = await timedDetect('フェーズ1.0 BarcodeDetectorクロップ', video);
                             recordBarcodeDetections('フェーズ1.0 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             recordBarcodeBoxes('フェーズ1.0 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
@@ -6110,7 +6434,7 @@
                     // --- [フェーズ 1 / ネイティブ優先] Hybrid (BarcodeDetector Crop + jsQR) ---
                     if (detectedItems.length === 0 && useNativeDetector) {
                         try {
-                            const barcodes = await barcodeDetector.detect(video);
+                            const barcodes = await timedDetect('フェーズ1 BarcodeDetectorクロップ', video);
                             recordBarcodeDetections('フェーズ1 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             recordBarcodeBoxes('フェーズ1 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
@@ -6223,7 +6547,7 @@
 
                             try {
                                 // BarcodeDetector はキャンバスも入力に取れる（ImageBitmapSource）
-                                const barcodes = await barcodeDetector.detect(zxingCanvas);
+                                const barcodes = await timedDetect('フェーズ1.5 中央クロップBarcodeDetector', zxingCanvas);
                                 recordBarcodeDetections('フェーズ1.5 中央クロップBarcodeDetector', barcodes ? barcodes.length : 0);
                                 recordBarcodeBoxes('フェーズ1.5 中央クロップBarcodeDetector', barcodes, scanStage, 'centerCanvas');
                                 if (barcodes && barcodes.length > 0) {
@@ -6287,7 +6611,7 @@
                                 _bdAuxCanvas.width = w; _bdAuxCanvas.height = h;
                                 _bdAuxCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
                                 let bcs = null;
-                                try { bcs = await barcodeDetector.detect(_bdAuxCanvas); } catch (e) { return; }
+                                try { bcs = await timedDetect(label, _bdAuxCanvas); } catch (e) { return; }
                                 recordBarcodeDetections(label, bcs ? bcs.length : 0);
                                 if (!bcs || !bcs.length) return;
                                 for (const b of bcs) {
@@ -6331,7 +6655,7 @@
                     // BarcodeDetector自身は暗号化QRを復号できないが、位置検出は高速に行える
                     if (detectedItems.length === 0 && barcodeDetector && scanStage === 3 && appMask) {
                         try {
-                            const barcodes = await barcodeDetector.detect(video);
+                            const barcodes = await timedDetect('フェーズ2 appMask BarcodeDetectorクロップ', video);
                             recordBarcodeDetections('フェーズ2 appMask BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                             recordBarcodeBoxes('フェーズ2 appMask BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                             if (barcodes && barcodes.length > 0) {
@@ -6543,7 +6867,9 @@
                             }
 
                             recordJsQrInput('フェーズ2.7 縮小全画面jsQR', 'full');
+                            const _t27 = nowPerf();
                             let fastResList = jsQR(fastData.data, tw, th, fastOpts);
+                            addPhaseElapsed(scanStage, 'フェーズ2.7 縮小全画面jsQR', nowPerf() - _t27, 'jsqr');
                             if (fastResList && !Array.isArray(fastResList)) fastResList = [fastResList];
                             if (fastResList && fastResList.length > 0) {
                                 const inv = 1 / fastScale;
@@ -6559,6 +6885,7 @@
                                     ];
                                     detectedItems.push({
                                         _debugInput: recordJsQrSuccess(),
+                                        patternInfo: buildPatternInfo(r),
                                         data: r.data,
                                         managementCode: r.managementCode,
                                         managementCode32: r.managementCode32,
@@ -6621,7 +6948,9 @@
                         }
 
                         recordJsQrInput('フェーズ2.8 適応/Sauvola全画面jsQR', 'full');
+                        const _t28 = nowPerf();
                         let adaptResList = jsQR(adaptBin, tw, th, adaptOpts);
+                        addPhaseElapsed(scanStage, 'フェーズ2.8 適応/Sauvola全画面jsQR', nowPerf() - _t28, 'jsqr');
                         if (adaptResList && !Array.isArray(adaptResList)) adaptResList = [adaptResList];
                         if (adaptResList && adaptResList.length > 0) {
                             const inv = 1 / adaptScale;
@@ -6636,6 +6965,7 @@
                                 ];
                                 detectedItems.push({
                                     _debugInput: recordJsQrSuccess(),
+                                    patternInfo: buildPatternInfo(r),
                                     data: r.data,
                                     managementCode: r.managementCode,
                                     managementCode32: r.managementCode32,
@@ -6685,7 +7015,9 @@
                         }
 
                         recordJsQrInput('フェーズ3 全画面jsQR', 'full');
+                        const _t3 = nowPerf();
                         let resFullList = jsQR(fullData.data, fullData.width, fullData.height, opts);
+                        addPhaseElapsed(scanStage, 'フェーズ3 全画面jsQR', nowPerf() - _t3, 'jsqr');
                         if (resFullList && !Array.isArray(resFullList)) resFullList = [resFullList];
 
                         if (resFullList && resFullList.length > 0) {
@@ -6695,6 +7027,7 @@
                                     
                                     detectedItems.push({
                                         _debugInput: recordJsQrSuccess(),
+                                        patternInfo: buildPatternInfo(resFull),
                                         data: resFull.data,
                                         managementCode: resFull.managementCode,
                                         managementCode32: resFull.managementCode32,
@@ -6738,6 +7071,7 @@
                         const qrNo = mgmtInfo ? mgmtInfo.qrNo : null;
                         recordQrSpecificSuccess(item._debugInput, qrNo);
                         recordQrCorners(qrNo, resultPts);
+                        recordQrMeta(qrNo, item, scanMode); // ★ P3: QR種類/version/mask/EC/配置パターンを記録
 
                         if (scanStage === 1) {
                             // Stage 1でQRを発見した際、領域を保存（複数検出時は UNION で代表させる）
@@ -6920,6 +7254,7 @@
                                     const _q2Pre = preLocateQ2SysEncLegacy({ sysEncDecode: true });
                                     if (_q2Pre) {
                                         recordImmediatePrelocate(false, true, 'sysEnc legacy');
+                                        recordQrMeta(1, _q2Pre, scanMode);
                                         secondQR = _q2Pre;
                                         isScanning = false;
                                         isProcessing = false;
@@ -6968,6 +7303,7 @@
                                     const _q2PreN = preLocateQ2SysEncLegacy({});
                                     if (_q2PreN) {
                                         recordImmediatePrelocate(false, true, 'normal plain');
+                                        recordQrMeta(1, _q2PreN, scanMode);
                                         secondQR = _q2PreN;
                                         isScanning = false;
                                         isProcessing = false;
