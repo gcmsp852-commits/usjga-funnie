@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader5</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -109,8 +109,7 @@
         <div class="status" id="statusText">モードを選択してください</div>
         <div id="btnContainer">
             <div class="mode-btns">
-                <button class="btn" id="normalModeBtn">通常モード</button>
-                <button class="btn sys-enc" id="digitalSignModeBtn">電子署名モード</button>
+                <button class="btn" id="startScanBtn">スキャン開始</button>
                 <button class="btn" id="colorEncModeBtn" style="background-color:#00897B; display:none;">カラー符号化モード</button>
                 <button class="btn secondary" id="logoutBtn" style="margin-top:10px; font-size:0.9rem;">端末情報を変更</button>
                 <!-- ★ 読取向き（縦/横）選択。押す度に切替。デフォルト=縦向き -->
@@ -2261,10 +2260,12 @@
         function qrTypeLabel(mgmtInfo, modeHint) {
             if (!mgmtInfo) return (modeHint === 'digital_sign') ? '電子署名' : '不明';
             const parts = [];
+            // 電子署名は管理ビット dataTypeBits===2（署名）で判別（モード非依存）
+            const isSign = (mgmtInfo.dataTypeBits === 2) || (modeHint === 'digital_sign');
             if (mgmtInfo.sysEncFlag) parts.push('システム暗号化');
             else if (mgmtInfo.appEncFlag) parts.push('ユーザ暗号化');
             else parts.push('ノーマル');
-            if (modeHint === 'digital_sign') parts.push('電子署名');
+            if (isSign) parts.push('電子署名');
             if (mgmtInfo.sameDataFlag) parts.push('同一データ');
             if (mgmtInfo.hasDateTime) parts.push('作成日時');
             if (mgmtInfo.hasExpiry) parts.push('読取期限');
@@ -3278,9 +3279,15 @@
         });
 
         // モード選択ボタン
-        document.getElementById('normalModeBtn').addEventListener('click', () => {
-            scanMode = 'normal';
-            document.getElementById('headerText').innerText = 'QR Twin Reader (通常モード)';
+        // ★ 統一スキャン開始：ノーマル/システム暗号化/ユーザ暗号化/電子署名を
+        //   第1QRの管理ビットで自動判別して読み取る（モード事前選択は不要）。
+        document.getElementById('startScanBtn').addEventListener('click', () => {
+            scanMode = 'normal';        // 統一モードの基準。電子署名検出時に内部で digital_sign へ切替。
+            scanStage = 1;
+            digitalSignStage3 = false;
+            sysEncStage3 = false;
+            appMask = null;
+            document.getElementById('headerText').innerText = 'QR Twin Reader';
             startCamera();
         });
 
@@ -3288,12 +3295,6 @@
             scanMode = 'double';
             document.getElementById('headerText').innerText = 'QR Twin Reader (二重暗号化モード)';
             startCamera();
-        });
-
-        document.getElementById('digitalSignModeBtn').addEventListener('click', () => {
-            scanMode = 'digital_sign';
-            document.getElementById('headerText').innerText = 'QR Twin Reader (電子署名対応)';
-            startScanByDigitalSign();
         });
 
         // ★ 新カラー符号化モード
@@ -3727,6 +3728,62 @@
                 : "第1QR（元のデータ）を探索中...";
         }
 
+        // ★ 電子署名の検証＆結果表示（firstQR/secondQR が揃った前提）。
+        //   Stage3 のペア完成時と、第1QR検出と同フレームの即時プリロケート成功時の両方から呼ぶ。
+        async function finalizeDigitalSign() {
+            isScanning = false;
+            isProcessing = false;
+            statusText.innerText = "電子署名を検証中...";
+
+            // (1) Base64からの復元
+            let signBytes;
+            try {
+                const binaryStr = atob(secondQR.text);
+                if (binaryStr.length !== 42) throw new Error("Invalid signature length");
+                signBytes = new Uint8Array(42);
+                for (let i = 0; i < 42; i++) signBytes[i] = binaryStr.charCodeAt(i);
+            } catch (e) {
+                showResultScreen({ verified: false, senderName: "不明", imageDataId: 0, hasImageDataId: false });
+                return;
+            }
+
+            const keyId = (signBytes[0] << 8) | signBytes[1];
+            const sigR = signBytes.slice(2, 22);
+            const sigS = signBytes.slice(22, 42);
+
+            // 画像データIDを第1QRの拡張管理部32bitから取得
+            const imageDataId = firstQR.managementExt32 || 0;
+            const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
+
+            // (2) 第1QRの全コード語（RS訂正済み再インタリーブ）でハッシュ計算と検証
+            try {
+                const pubKeyCacheHex = ECDSA_PUBLIC_KEYS[keyId];
+                let verified = false;
+                let senderName = "不明";
+
+                const codewordsArray = firstQR.codewords;
+                const hashInput = new Uint8Array(codewordsArray);
+                const hashValue = sha256Bytes(hashInput);
+
+                const cwFirst8 = Array.from(codewordsArray).slice(0, 8).join(',');
+                const cwLast8 = Array.from(codewordsArray).slice(-8).join(',');
+                console.log(`[Verify] KeyID:${keyId}, Hash:${bytesToHex(hashValue)}, CW_len:${codewordsArray.length}, CW_first8:[${cwFirst8}], CW_last8:[${cwLast8}], ImageDataID:${imageDataId}`);
+
+                if (pubKeyCacheHex) {
+                    senderName = ECDSA_SENDER_NAMES[keyId] || `ID:${keyId}`;
+                    verified = ecdsaVerify(hashInput, sigR, sigS, pubKeyCacheHex);
+                    console.log(`[Verify] Result: ${verified ? 'PASS ✓' : 'FAIL ✗'}, Sender: ${senderName}, PubKey: ${pubKeyCacheHex.substring(0, 12)}...`);
+                } else {
+                    console.warn(`[Verify] Unknown KeyID: ${keyId}, no public key found`);
+                }
+
+                showResultScreen({ verified: verified, senderName: senderName, imageDataId: imageDataId, hasImageDataId: hasImageDataId });
+            } catch (err) {
+                console.error("Verification failed", err);
+                showResultScreen({ verified: false, senderName: "エラー", imageDataId: 0, hasImageDataId: false });
+            }
+        }
+
         function isHttpUrlText(text) {
             if (!text) return false;
             try {
@@ -3920,6 +3977,8 @@
         }
 
         function restartScan() {
+            // ★ 統一モード: 電子署名は自動判別なので、再スキャンは常に統一(normal)から開始
+            if (scanMode === 'digital_sign') scanMode = 'normal';
             document.getElementById('resultScreen').style.display = 'none';
             { const _ts = document.getElementById('timeoutScreen'); if (_ts) _ts.style.display = 'none'; }
             document.getElementById('passwordScreen').style.display = 'none';
@@ -7263,6 +7322,20 @@
                                     }
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
                                     enterDigitalSignPairScan(1);
+                                    // ★ 電子署名も他の暗号ツインと同様、第1QR検出と同フレームで第2QRを多変種プリロケート。
+                                    //   これが無い（従来）と、電子署名だけ Stage3 反復頼みになり、
+                                    //   720スケール/回転変種でしか読めない twin が読めずタイムアウトしていた。
+                                    recordImmediatePrelocate(true, false, 'digital_sign');
+                                    const _q2PreDs = preLocateQ2SysEncLegacy({ sysEncDecode: true });
+                                    if (_q2PreDs) {
+                                        recordImmediatePrelocate(false, true, 'digital_sign');
+                                        recordQrMeta(1, _q2PreDs, scanMode);
+                                        secondQR = { text: _q2PreDs.text, managementCode: _q2PreDs.managementCode, points: _q2PreDs.points, center: _q2PreDs.center };
+                                        await finalizeDigitalSign();
+                                        return;
+                                    } else {
+                                        recordImmediatePrelocate(false, false, 'digital_sign');
+                                    }
                                 } else if (qrNo === 1) {
                                     secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
                                     enterDigitalSignPairScan(0);
@@ -7344,7 +7417,27 @@
                             }
 
                             if (scanMode === 'normal') {
-                                if (mgmtInfo && mgmtInfo.sysEncFlag) {
+                                // ★ 統一モード: 第1QRの管理ビットでツイン種別を自動判別。
+                                //   電子署名ツイン = sysEncFlag=true かつ dataTypeBits===2(署名)。
+                                //   （生成側が第1/第2QR両方に sysEncビット＋署名dataTypeを付与）
+                                if (mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.dataTypeBits === 2) {
+                                    // === 電子署名ツイン（自動判別）→ 既存の電子署名フローへ ===
+                                    scanMode = 'digital_sign'; // 既存の電子署名フェーズ条件/Stage3処理を有効化
+                                    statusText.innerText = "第2QR（電子署名データ）を探索中...";
+                                    enterDigitalSignPairScan(1); // scanStage=3, digitalSignStage3=true, 幾何保存
+                                    // 第1QR検出と同フレームで第2QR（署名・システム暗号化）を多変種プリロケート
+                                    recordImmediatePrelocate(true, false, 'digital_sign');
+                                    const _q2PreDs = preLocateQ2SysEncLegacy({ sysEncDecode: true });
+                                    if (_q2PreDs) {
+                                        recordImmediatePrelocate(false, true, 'digital_sign');
+                                        recordQrMeta(1, _q2PreDs, scanMode);
+                                        secondQR = { text: _q2PreDs.text, managementCode: _q2PreDs.managementCode, points: _q2PreDs.points, center: _q2PreDs.center };
+                                        await finalizeDigitalSign();
+                                        return;
+                                    } else {
+                                        recordImmediatePrelocate(false, false, 'digital_sign');
+                                    }
+                                } else if (mgmtInfo && mgmtInfo.sysEncFlag) {
                                     scanStage = 3;
                                     sysEncStage3 = true;
                                     if (firstQR) { preserveFirstQrGeometryForQ2(); ensureFirstCenter(firstQR); firstQR.points = null; }
@@ -7488,60 +7581,9 @@
                                     continue; // それ以外の重複読取は無視
                                 }
 
-                                // 必要な両方のQRが揃った → 電子署名の検証を実行
+                                // 必要な両方のQRが揃った → 電子署名の検証を実行（共通関数）
                                 if (firstQR && secondQR) {
-                                    isScanning = false;
-                                    isProcessing = false;
-                                    statusText.innerText = "電子署名を検証中...";
-
-                                    // (1) Base64からの復元
-                                    let signBytes;
-                                    try {
-                                        const binaryStr = atob(secondQR.text);
-                                        if (binaryStr.length !== 42) throw new Error("Invalid signature length");
-                                        signBytes = new Uint8Array(42);
-                                        for (let i = 0; i < 42; i++) signBytes[i] = binaryStr.charCodeAt(i);
-                                    } catch(e) {
-                                        showResultScreen({ verified: false, senderName: "不明", imageDataId: 0, hasImageDataId: false });
-                                        return;
-                                    }
-
-                                    const keyId = (signBytes[0] << 8) | signBytes[1];
-                                    const sigR = signBytes.slice(2, 22);
-                                    const sigS = signBytes.slice(22, 42);
-
-                                    // 画像データIDを第1QRの拡張管理部32bitから取得
-                                    const imageDataId = firstQR.managementExt32 || 0;
-                                    const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
-
-                                        // (2) 第1QRの全コード語（RS訂正済み再インタリーブ）でハッシュ計算と検証
-                                        try {
-                                            const pubKeyCacheHex = ECDSA_PUBLIC_KEYS[keyId];
-                                            let verified = false;
-                                            let senderName = "不明";
-
-                                            // 全コード語（データ+管理部+拡張管理部+埋め草+ECC、RS訂正済み）をハッシュ
-                                            const codewordsArray = firstQR.codewords;
-                                            const hashInput = new Uint8Array(codewordsArray);
-                                            const hashValue = sha256Bytes(hashInput);
-
-                                            const cwFirst8 = Array.from(codewordsArray).slice(0, 8).join(',');
-                                            const cwLast8 = Array.from(codewordsArray).slice(-8).join(',');
-                                            console.log(`[Verify] KeyID:${keyId}, Hash:${bytesToHex(hashValue)}, CW_len:${codewordsArray.length}, CW_first8:[${cwFirst8}], CW_last8:[${cwLast8}], ImageDataID:${imageDataId}`);
-
-                                        if (pubKeyCacheHex) {
-                                            senderName = ECDSA_SENDER_NAMES[keyId] || `ID:${keyId}`;
-                                            verified = ecdsaVerify(hashInput, sigR, sigS, pubKeyCacheHex);
-                                            console.log(`[Verify] Result: ${verified ? 'PASS ✓' : 'FAIL ✗'}, Sender: ${senderName}, PubKey: ${pubKeyCacheHex.substring(0,12)}...`);
-                                        } else {
-                                            console.warn(`[Verify] Unknown KeyID: ${keyId}, no public key found`);
-                                        }
-
-                                        showResultScreen({ verified: verified, senderName: senderName, imageDataId: imageDataId, hasImageDataId: hasImageDataId });
-                                    } catch (err) {
-                                        console.error("Verification failed", err);
-                                        showResultScreen({ verified: false, senderName: "エラー", imageDataId: 0, hasImageDataId: false });
-                                    }
+                                    await finalizeDigitalSign();
                                     return;
                                 }
                                 continue;
