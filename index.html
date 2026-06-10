@@ -2418,6 +2418,27 @@
             return profile;
         }
 
+        function buildQ2ProfileForStage3() {
+            let profile;
+            if (appMask) {
+                profile = {
+                    kind: 'appenc',
+                    winTag: 'appEnc stage3',
+                    optsList: [ { appEncMask: Array.from(appMask), sysEncDecode: true } ],
+                    acceptRawAppEnc: false
+                };
+            } else if (scanMode === 'digital_sign' && digitalSignStage3) {
+                profile = { kind: 'digitalsign', winTag: 'digital_sign', optsList: [ {}, { sysEncDecode: true } ] };
+            } else if (scanMode === 'normal' && sysEncStage3) {
+                profile = { kind: 'sysenc', winTag: 'sysEnc legacy', optsList: [ { sysEncDecode: true } ] };
+            } else {
+                profile = { kind: 'normal', winTag: 'normal plain', optsList: [ {} ] };
+            }
+            profile.firstQrPoints = getFirstQrGeometryForQ2();
+            profile.firstQrVersionNumber = firstQR && firstQR.versionNumber;
+            return profile;
+        }
+
         // ★ Phase A: 第2QR 即時プリロケート（全種共用・プロファイル駆動の多変種ラダー）。
         //   profile.optsList の各復号設定 × 二値化{native,Sauvola,Otsu} × スケール{960,720} × 回転 を
         //   早期終了で試す。appEnc は幾何クロップ(firstQrPoints)と生暗号文E(acceptRawAppEnc)に対応。
@@ -2608,7 +2629,7 @@
             }
 
             // ② スケール多重（960,720）× 二値化 × optsList（960は回転保険も）
-            const scales = [960, 720];
+            const scales = Array.isArray(ladderOpts.fullScales) ? ladderOpts.fullScales : [960, 720];
             for (const maxDim of scales) {
                 const scale = Math.min(1, maxDim / Math.max(vw, vh));
                 const tw = Math.max(1, Math.round(vw * scale));
@@ -2622,7 +2643,7 @@
                 if (hit) return hit;
 
                 // 回転バリアント（960スケール時のみ：方向性ノイズ対策の保険）
-                if (maxDim === 960) {
+                if (maxDim === 960 && ladderOpts.rotateFull !== false) {
                     const rot = rotateRGBA90(data.data, tw, th, 'cw');
                     const hitR = tryDecode(rot.data, rot.width, rot.height, (rx, ry) => {
                         const p = unrotatePoint90(rx, ry, tw, th, 'cw');
@@ -6558,6 +6579,24 @@
                     }
 
                     let cropBBox = null;
+                    let skipLegacyQ2Ladder = false;
+
+                    if (scanStage === 3 && firstQR) {
+                        skipLegacyQ2Ladder = true;
+                        fullScanFrameIdx++;
+                        const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
+                        const heavyScales = [];
+                        if (fullScanFrameIdx % 3 === 0) heavyScales.push(960);
+                        else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
+                        if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
+                        const ladderHit = await runLadder('Q2', buildQ2ProfileForStage3(), {
+                            fullScales: heavyScales,
+                            rotateFull: fullScanFrameIdx % 6 === 0
+                        });
+                        if (ladderHit) detectedItems.push(ladderHit);
+                    }
+
+                    if (!skipLegacyQ2Ladder) {
 
                     // --- [フェーズ 0.5 / 高速 Q2 ジオメトリ復号] ---
                     // Stage 1 で確定した firstQR の点情報（4 角）と QR バージョンから、
@@ -7358,6 +7397,8 @@
                                 }
                             }
                         }
+                    }
+
                     }
 
                     // ★ ここで何か検出できていれば AF nudge タイマをリセット（過剰な再フォーカスを防ぐ）
