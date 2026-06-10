@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader6</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2418,6 +2418,14 @@
             return profile;
         }
 
+        function buildQ1ProfileForStage1() {
+            return {
+                kind: (scanMode === 'double') ? 'q1-sysenc' : 'q1-plain',
+                winTag: 'stage1 q1',
+                optsList: (scanMode === 'double') ? [ { sysEncDecode: true } ] : [ {} ]
+            };
+        }
+
         function buildQ2ProfileForStage3() {
             let profile;
             if (appMask) {
@@ -2444,7 +2452,7 @@
         //   早期終了で試す。appEnc は幾何クロップ(firstQrPoints)と生暗号文E(acceptRawAppEnc)に対応。
         //   1ショットだが当たれば即returnなので、当たる印刷/向きでは従来同等に軽い。
         async function runLadder(target, profile, ladderOpts = {}) {
-            if (target !== 'Q2') return null;
+            if (target !== 'Q1' && target !== 'Q2') return null;
             if (!profile) profile = { optsList: [ {} ] };
             const optsList = (profile.optsList && profile.optsList.length) ? profile.optsList : [ {} ];
             if (!video || !video.videoWidth || !video.videoHeight) { recordPrelocateReason('ビデオ未準備'); return null; }
@@ -2454,10 +2462,10 @@
             let sawRaw = false, sawOther = false;
 
             // 1件の result を Q2 として採用できるか判定。採用なら Q2 オブジェクト、不可なら null。
-            const acceptQ2 = (res, mapPt, binName, scaleTag, rotTag, decLabel) => {
+            const acceptResult = (res, mapPt, binName, scaleTag, rotTag, decLabel) => {
                 if (!res) return null;
                 // ユーザ暗号化：生暗号文 E（isRaw もしくは空data + dataBytes）を Q2 とみなす
-                if (profile.acceptRawAppEnc) {
+                if (target === 'Q2' && profile.acceptRawAppEnc) {
                     const hasBytes = res.dataBytes && res.dataBytes.length;
                     const looksQ2 = hasBytes && (res.isRaw || !res.data || res.data === '');
                     if (looksQ2) {
@@ -2470,8 +2478,9 @@
                         ];
                         recordPrelocateReason('成功');
                         getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
-                        recordJsQrSuccess(1);
+                        const debugInput = recordJsQrSuccess(1);
                         return {
+                            _debugInput: debugInput,
                             text: null, data: null,
                             encryptedDataBytes: Array.from(res.dataBytes),
                             rawData: {
@@ -2492,10 +2501,13 @@
                     ? (res.managementCode32 >>> 0)
                     : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
                 const info = parseStandardMgmt(mc32);
-                if (!info || info.qrNo !== 1) { sawOther = true; return null; }
-                recordPrelocateReason('成功');
-                getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
-                recordJsQrSuccess(1);
+                const wantQrNo = (target === 'Q1') ? 0 : 1;
+                if (!info || info.qrNo !== wantQrNo) { sawOther = true; return null; }
+                if (target === 'Q2') {
+                    recordPrelocateReason('成功');
+                    getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
+                }
+                const debugInput = recordJsQrSuccess(wantQrNo);
                 const L = res.location;
                 const pts = [
                     mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
@@ -2504,6 +2516,7 @@
                     mapPt(L.bottomLeftCorner.x, L.bottomLeftCorner.y)
                 ];
                 return {
+                    _debugInput: debugInput,
                     text: res.data,
                     data: res.data,
                     patternInfo: buildPatternInfo(res),
@@ -2552,7 +2565,7 @@
                         if (!r) continue;
                         const decLabel = dopt.sysEncDecode ? 'sysenc' : (dopt.appEncMask ? 'appmask' : 'plain');
                         for (const res of r) {
-                            const hit = acceptQ2(res, mapPt, v.name, scaleTag, rotTag, decLabel);
+                            const hit = acceptResult(res, mapPt, v.name, scaleTag, rotTag, decLabel);
                             if (hit) return hit;
                         }
                     }
@@ -2653,8 +2666,10 @@
                 }
             }
 
-            recordPrelocateReason(sawOther ? 'Q2なし(第1QR等のみ検出)'
-                : (sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
+            if (target === 'Q2') {
+                recordPrelocateReason(sawOther ? 'Q2なし(第1QR等のみ検出)'
+                    : (sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
+            }
             return null;
         }
 
@@ -6579,10 +6594,23 @@
                     }
 
                     let cropBBox = null;
-                    let skipLegacyQ2Ladder = false;
+                    let skipLegacyLadder = false;
 
-                    if (scanStage === 3 && firstQR) {
-                        skipLegacyQ2Ladder = true;
+                    if (scanStage === 1) {
+                        skipLegacyLadder = true;
+                        fullScanFrameIdx++;
+                        const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
+                        const q1Scales = [];
+                        if (fullScanFrameIdx % 2 === 0) q1Scales.push(960);
+                        else q1Scales.push(720);
+                        if (maxDim > 0 && fullScanFrameIdx % 8 === 5) q1Scales.push(maxDim);
+                        const ladderHit = await runLadder('Q1', buildQ1ProfileForStage1(), {
+                            fullScales: q1Scales,
+                            rotateFull: true
+                        });
+                        if (ladderHit) detectedItems.push(ladderHit);
+                    } else if (scanStage === 3 && firstQR) {
+                        skipLegacyLadder = true;
                         fullScanFrameIdx++;
                         const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
                         const heavyScales = [];
@@ -6596,7 +6624,7 @@
                         if (ladderHit) detectedItems.push(ladderHit);
                     }
 
-                    if (!skipLegacyQ2Ladder) {
+                    if (!skipLegacyLadder) {
 
                     // --- [フェーズ 0.5 / 高速 Q2 ジオメトリ復号] ---
                     // Stage 1 で確定した firstQR の点情報（4 角）と QR バージョンから、
