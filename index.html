@@ -140,18 +140,18 @@
         </div>
     </div>
 
-    <!-- 20秒タイムアウト画面（未完了でも取得済み情報を表示・蓄積＋コメント） -->
+    <!-- 10秒タイムアウト画面（未完了でも取得済み情報を表示・蓄積＋コメント） -->
     <div class="overlay-screen" id="timeoutScreen" style="display:none;">
         <div class="overlay-box" style="gap:14px;">
-            <h2 style="color:#FF9800;">⏱ 20秒経過：読み取りを終了しました</h2>
-            <p>20秒以内に読み取りが完了しませんでした。<br>下記は取得できた範囲の読取デバッグ情報です（蓄積済み）。</p>
+            <h2 style="color:#FF9800;">⏱ 10秒経過：読み取りを終了しました</h2>
+            <p>10秒以内に読み取りが完了しませんでした。<br>下記は取得できた範囲の読取デバッグ情報です（蓄積済み）。</p>
             <div class="qr-data-card" style="border-color:#FF9800;">
-                <label style="color:#FF9800;">読取デバッグ情報（20秒タイムアウト）</label>
+                <label style="color:#FF9800;">読取デバッグ情報（10秒タイムアウト）</label>
                 <div class="text" id="timeoutStatsText" style="text-align:left; white-space:pre-wrap; max-height:30dvh; overflow:auto;">-</div>
                 <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; margin-top:8px;" onclick="copyScanDebugInfo()">この試行をコピー</button>
             </div>
             <div class="qr-data-card">
-                <label>コメント（この20秒タイムアウトQRツインについて）</label>
+                <label>コメント（この10秒タイムアウトQRツインについて）</label>
                 <textarea id="timeoutCommentInput" rows="3" style="width:100%; box-sizing:border-box; padding:10px; font-size:1rem; border-radius:6px; border:1px solid #444; background:#000; color:#fff;" placeholder="例：手ブレが多い／反射あり／QRが小さい／ピントが合わない 等"></textarea>
                 <button class="btn" style="margin-top:8px;" onclick="saveTimeoutComment()">コメントを蓄積して閉じる</button>
             </div>
@@ -875,8 +875,8 @@
             if (typeof statusText !== 'undefined' && statusText) statusText.innerText = '読取向きを「' + orientationLabel(readOrientationManual) + '」にしました';
         }
 
-        // ★ 20秒タイムアウト：QRツイン読取開始から20秒で打ち切り、取得済み情報でデバッグ表示＆蓄積。
-        const SCAN_TIMEOUT_MS = 20000;
+        // ★ 10秒タイムアウト：QRツイン読取開始から10秒で打ち切り、取得済み情報でデバッグ表示＆蓄積。
+        const SCAN_TIMEOUT_MS = 10000;
         let twinReadStartedAt = 0;     // 読取開始時刻(perf ms)。resetScanDebugStatsで0化→scanLoop初回で設定。
         let lastTimeoutTrialId = null; // 直近タイムアウト試行の蓄積レコードID（コメント追記用）
 
@@ -1281,16 +1281,6 @@
             getScanDebugStats().immediatePrelocate.lastReason = reason;
         }
 
-        function markScanCompleted(outcome = 'completed') {
-            const stats = getScanDebugStats();
-            if (stats.finishedPerf != null) return;
-            const elapsed = stats.startedPerf != null ? (nowPerf() - stats.startedPerf) : null;
-            stats.finishedAt = Date.now();
-            stats.finishedPerf = nowPerf();
-            stats.finishedElapsed = elapsed;
-            stats.outcome = outcome;
-        }
-
         function resetScanDebugStats() {
             scanDebugStats = {
                 startedAt: Date.now(),
@@ -1315,10 +1305,6 @@
                 qrMeta: {},          // ★ P3: 第1/第2QRのメタ（種類・version・mask・EC・配置パターン）
                 prelocateWin: null,  // ★ P3: 即時プリロケートが当たった変種(スケール×二値化×回転)
                 readOrientation: (typeof readOrientationManual !== 'undefined' ? readOrientationManual : 'portrait'), // ★ 手動選択の読取向き
-                outcome: 'running',
-                finishedAt: null,
-                finishedPerf: null,
-                finishedElapsed: null,
                 immediatePrelocate: {
                     attempted: 0,
                     success: 0,
@@ -1327,7 +1313,7 @@
                 }
             };
             jsQrCropDebugRects = [];
-            twinReadStartedAt = 0; // ★ 新しい読取開始：20秒タイマをリセット（scanLoop初回で再設定）
+            twinReadStartedAt = 0; // ★ 新しい読取開始：10秒タイマをリセット（scanLoop初回で再設定）
         }
 
         function getScanDebugStats() {
@@ -1521,10 +1507,7 @@
 
             // ── P3計測: 所要時間・フレーム数 ──
             const fmtMs = (v) => (v === null || v === undefined || !Number.isFinite(v)) ? '-' : Math.round(v) + 'ms';
-            const totalElapsed = (stats.finishedElapsed != null)
-                ? stats.finishedElapsed
-                : ((stats.startedPerf != null) ? (nowPerf() - stats.startedPerf) : null);
-            const outcomeLabel = stats.outcome === 'timeout' ? 'タイムアウト' : (stats.outcome === 'completed' ? '完了' : '読取中');
+            const totalElapsed = (stats.startedPerf != null) ? (nowPerf() - stats.startedPerf) : null;
             const s1Frames = stats.frames.byStage['1'] || 0;
             const s3Frames = stats.frames.byStage['3'] || 0;
             const q2AddFrames = (stats.secondSuccessFrame != null && stats.firstSuccessFrame != null)
@@ -1532,8 +1515,7 @@
             lines.push('第1QR確定まで: ' + fmtMs(stats.firstSuccessAt) + (stats.firstSuccessFrame != null ? ` / ${stats.firstSuccessFrame}フレーム目` : ''));
             lines.push('第2QR確定まで: ' + fmtMs(stats.secondSuccessAt) + (stats.secondSuccessFrame != null ? ` / ${stats.secondSuccessFrame}フレーム目` : ''));
             lines.push('第1→第2QRの追加フレーム数: ' + (q2AddFrames != null ? `${q2AddFrames}フレーム` : '-'));
-            lines.push('読取結果: ' + outcomeLabel);
-            lines.push('総経過(確定時点): ' + fmtMs(totalElapsed) + ` / 総処理フレーム ${stats.frames.total} (Stage1=${s1Frames}, Stage3=${s3Frames})`);
+            lines.push('総経過(コピー時点): ' + fmtMs(totalElapsed) + ` / 総処理フレーム ${stats.frames.total} (Stage1=${s1Frames}, Stage3=${s3Frames})`);
 
             // ── P3計測: QRの傾き角（縦持ち/横持ちの自動判定。バッファは常に縦長固定なので物理回転は傾き角に現れる） ──
             const q1ang = (stats.qr1Angle != null) ? stats.qr1Angle : (stats.qr1Corners ? computeTiltAngleDeg(stats.qr1Corners) : null);
@@ -1681,7 +1663,7 @@
         }
 
         // 現在の読取（1試行）の計測を、蓄積ログへ1レコード追記する。
-        // 完了画面表示 or 20秒タイムアウト時に呼ぶ。二重追記は _logged フラグで防止。
+        // 完了画面表示 or 10秒タイムアウト時に呼ぶ。二重追記は _logged フラグで防止。
         // 返り値: 追記したレコードのID（スキップ時は null）。
         function appendCurrentTrialToLog() {
             const stats = getScanDebugStats();
@@ -1697,7 +1679,7 @@
             const tsStr = ts.getFullYear() + '-' + String(ts.getMonth() + 1).padStart(2, '0') + '-' + String(ts.getDate()).padStart(2, '0')
                 + ' ' + String(ts.getHours()).padStart(2, '0') + ':' + String(ts.getMinutes()).padStart(2, '0') + ':' + String(ts.getSeconds()).padStart(2, '0');
             const orient = stats.readOrientation || 'portrait';
-            const outcome = isTimeout ? '[20秒タイムアウト/未完了]' : '[完了]';
+            const outcome = isTimeout ? '[10秒タイムアウト/未完了]' : '[完了]';
             const header = '========== 試行 #' + id + ' / ' + tsStr + ' / mode=' + scanMode + ' / 向き=' + orientationLabel(orient) + ' / ' + outcome + ' ==========';
             const rec = {
                 id,
@@ -1729,7 +1711,7 @@
             const log = loadDebugLog();
             const rec = log.find(r => r && r.id === id);
             if (!rec) return false;
-            const tag = isTimeout ? '【ユーザコメント / 対象=20秒タイムアウトQRツイン】' : '【ユーザコメント】';
+            const tag = isTimeout ? '【ユーザコメント / 対象=10秒タイムアウトQRツイン】' : '【ユーザコメント】';
             rec.comment = comment;
             rec.commentForTimeout = !!isTimeout;
             rec.text = rec.text + '\n' + tag + ' ' + comment;
@@ -1821,7 +1803,7 @@
             if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'デバッグログを消去しました';
         }
 
-        // ★ 20秒タイムアウト：読み取りを打ち切り、取得済み情報でデバッグ表示＆蓄積し、コメント欄を出す。
+        // ★ 10秒タイムアウト：読み取りを打ち切り、取得済み情報でデバッグ表示＆蓄積し、コメント欄を出す。
         function handleScanTimeout() {
             if (!isScanning) return;
             twinReadStartedAt = 0;
@@ -1839,7 +1821,11 @@
         function showTimeoutResult() {
             const stats = getScanDebugStats();
             stats._timeout = true; // 蓄積レコードにタイムアウト印
-            markScanCompleted('timeout');
+            // ★ Phase D: 完了msとタイムアウトの区別。10秒到達＝未完了（完了時はscanLoopがreturnし
+            //   isScanning=false で本関数に来ない）。Stage1での一過性 qrNo===1 検出で secondSuccessAt が
+            //   立つことがあるため、タイムアウト記録では「第2QR確定」を未確定('-')へ正す。
+            stats.secondSuccessAt = null;
+            stats.secondSuccessFrame = null;
             const text = formatScanDebugStats();
             const el = document.getElementById('timeoutStatsText');
             if (el) el.innerText = text;
@@ -1850,7 +1836,7 @@
             try { document.getElementById('cameraControls').style.display = 'none'; } catch (e) {}
             const scr = document.getElementById('timeoutScreen');
             if (scr) scr.style.display = 'flex';
-            if (typeof statusText !== 'undefined' && statusText) statusText.innerText = '20秒経過：読み取りを終了しました';
+            if (typeof statusText !== 'undefined' && statusText) statusText.innerText = '10秒経過：読み取りを終了しました';
         }
 
         // タイムアウト画面でコメントを保存（蓄積レコードへ追記）して閉じる。
@@ -2241,6 +2227,9 @@
                 codewordsLen: res.codewords ? res.codewords.length : (res.dataBytes ? res.dataBytes.length : null),
                 dataLen: (typeof res.data === 'string') ? res.data.length : null
             };
+            // ★ Phase C: 真のモジュール行列(透視補正後NxN)を優先。無ければ従来の画像行列にフォールバック。
+            //   これにより fp/dark/run が「印刷されたセル配置の指紋」になり、撮像距離/クロップに不変。
+            //   Q1/Q2 も各自の行列を持つので、ツインで fp が衝突しなくなる（旧: 同一画像行列で fp 一致）。
             const m = res.moduleMatrix || res.matrix;
             if (m && m.data && m.width) {
                 const w = m.width, h = m.height, d = m.data;
@@ -2266,6 +2255,7 @@
                 let hsh = 0x811c9dc5; // FNV-1a（モジュール配置の指紋。同一配置→同一値）
                 for (let i = 0; i < d.length; i++) { hsh ^= (d[i] ? 1 : 0); hsh = (hsh * 0x01000193) >>> 0; }
                 info.modN = w;
+                info.moduleScale = !!res.moduleMatrix; // true=真のモジュール行列(NxN), false=画像行列フォールバック
                 info.dark = dark;
                 info.darkRatio = +(dark / (w * h)).toFixed(3);
                 info.maxRunH = maxRunH;
@@ -2430,71 +2420,11 @@
             return { kind: 'normal', winTag: 'normal plain', optsList: [ {} ] };
         }
 
-        function buildQ2ProfileForFirst(mgmtInfo) {
-            const profile = buildTwinProfile(mgmtInfo);
-            profile.firstQrPoints = getFirstQrGeometryForQ2();
-            profile.firstQrVersionNumber = firstQR && firstQR.versionNumber;
-            return profile;
-        }
-
-        function buildQ1ProfileForStage1() {
-            return {
-                kind: (scanMode === 'double') ? 'q1-sysenc' : 'q1-plain',
-                winTag: 'stage1 q1',
-                optsList: (scanMode === 'double') ? [ { sysEncDecode: true } ] : [ {} ]
-            };
-        }
-
-        function buildQ2ProfileForStage3() {
-            let profile;
-            if (appMask) {
-                profile = {
-                    kind: 'appenc',
-                    winTag: 'appEnc stage3',
-                    optsList: [ { appEncMask: Array.from(appMask), sysEncDecode: true } ],
-                    acceptRawAppEnc: false
-                };
-            } else if (scanMode === 'digital_sign' && digitalSignStage3) {
-                profile = { kind: 'digitalsign', winTag: 'digital_sign', optsList: [ {}, { sysEncDecode: true } ] };
-            } else if (scanMode === 'normal' && sysEncStage3) {
-                profile = { kind: 'sysenc', winTag: 'sysEnc legacy', optsList: [ { sysEncDecode: true } ] };
-            } else {
-                profile = { kind: 'normal', winTag: 'normal plain', optsList: [ {} ] };
-            }
-            profile.firstQrPoints = getFirstQrGeometryForQ2();
-            profile.firstQrVersionNumber = firstQR && firstQR.versionNumber;
-            return profile;
-        }
-
-        async function dispatchQ2Found(profile, q2, modeHint = scanMode) {
-            if (!q2) return false;
-            const kind = profile && profile.kind;
-            if (kind === 'appenc' && q2.encryptedDataBytes) {
-                savedQ2AppEncData = q2;
-                isProcessing = false;
-                showPasswordScreen();
-                return true;
-            }
-
-            recordQrMeta(1, q2, modeHint);
-            secondQR = q2;
-            if (kind === 'digitalsign' || modeHint === 'digital_sign' || scanMode === 'digital_sign') {
-                await finalizeDigitalSign();
-                return true;
-            }
-
-            isScanning = false;
-            isProcessing = false;
-            showResultScreen();
-            return true;
-        }
-
         // ★ Phase A: 第2QR 即時プリロケート（全種共用・プロファイル駆動の多変種ラダー）。
         //   profile.optsList の各復号設定 × 二値化{native,Sauvola,Otsu} × スケール{960,720} × 回転 を
         //   早期終了で試す。appEnc は幾何クロップ(firstQrPoints)と生暗号文E(acceptRawAppEnc)に対応。
         //   1ショットだが当たれば即returnなので、当たる印刷/向きでは従来同等に軽い。
-        async function runLadder(target, profile, ladderOpts = {}) {
-            if (target !== 'Q1' && target !== 'Q2') return null;
+        function runQ2Prelocate(profile) {
             if (!profile) profile = { optsList: [ {} ] };
             const optsList = (profile.optsList && profile.optsList.length) ? profile.optsList : [ {} ];
             if (!video || !video.videoWidth || !video.videoHeight) { recordPrelocateReason('ビデオ未準備'); return null; }
@@ -2504,10 +2434,10 @@
             let sawRaw = false, sawOther = false;
 
             // 1件の result を Q2 として採用できるか判定。採用なら Q2 オブジェクト、不可なら null。
-            const acceptResult = (res, mapPt, binName, scaleTag, rotTag, decLabel) => {
+            const acceptQ2 = (res, mapPt, binName, scaleTag, rotTag, decLabel) => {
                 if (!res) return null;
                 // ユーザ暗号化：生暗号文 E（isRaw もしくは空data + dataBytes）を Q2 とみなす
-                if (target === 'Q2' && profile.acceptRawAppEnc) {
+                if (profile.acceptRawAppEnc) {
                     const hasBytes = res.dataBytes && res.dataBytes.length;
                     const looksQ2 = hasBytes && (res.isRaw || !res.data || res.data === '');
                     if (looksQ2) {
@@ -2520,11 +2450,9 @@
                         ];
                         recordPrelocateReason('成功');
                         getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
-                        const debugInput = recordJsQrSuccess(1);
+                        recordJsQrSuccess(1);
                         return {
-                            _debugInput: debugInput,
                             text: null, data: null,
-                            patternInfo: buildPatternInfo(res),
                             encryptedDataBytes: Array.from(res.dataBytes),
                             rawData: {
                                 encryptedDataBytes: Array.from(res.dataBytes),
@@ -2544,13 +2472,10 @@
                     ? (res.managementCode32 >>> 0)
                     : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
                 const info = parseStandardMgmt(mc32);
-                const wantQrNo = (target === 'Q1') ? 0 : 1;
-                if (!info || info.qrNo !== wantQrNo) { sawOther = true; return null; }
-                if (target === 'Q2') {
-                    recordPrelocateReason('成功');
-                    getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
-                }
-                const debugInput = recordJsQrSuccess(wantQrNo);
+                if (!info || info.qrNo !== 1) { sawOther = true; return null; }
+                recordPrelocateReason('成功');
+                getScanDebugStats().prelocateWin = 'scale=' + scaleTag + ', bin=' + binName + ', rot=' + rotTag + ', dec=' + decLabel;
+                recordJsQrSuccess(1);
                 const L = res.location;
                 const pts = [
                     mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
@@ -2559,7 +2484,6 @@
                     mapPt(L.bottomLeftCorner.x, L.bottomLeftCorner.y)
                 ];
                 return {
-                    _debugInput: debugInput,
                     text: res.data,
                     data: res.data,
                     patternInfo: buildPatternInfo(res),
@@ -2585,7 +2509,7 @@
 
             // RGBA を 二値化{native,Sauvola,Otsu} × optsList で復号し、最初に採用できた Q2 を返す。
             // mapPt(x,y): その画像座標を元動画座標へ写す関数。 scaleTag/rotTag: 当たった変種の記録用。
-            const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel, imageType = 'full') => {
+            const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel) => {
                 const variants = [
                     { name: 'native', d: rgba, pre: false },
                     { name: 'sauvola', d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true },
@@ -2598,7 +2522,7 @@
                         if (dopt.sysEncDecode) opts.sysEncDecode = dopt.sysEncDecode;
                         if (dopt.appEncMask) opts.appEncMask = dopt.appEncMask;
                         if (dopt.captureAppEncDataBytes) opts.captureAppEncDataBytes = true;
-                        recordJsQrInput(phaseLabel, imageType);
+                        recordJsQrInput(phaseLabel, 'full');
                         const _tp = nowPerf();
                         let r = null;
                         try { r = jsQR(v.d, w, h, opts); }
@@ -2608,7 +2532,7 @@
                         if (!r) continue;
                         const decLabel = dopt.sysEncDecode ? 'sysenc' : (dopt.appEncMask ? 'appmask' : 'plain');
                         for (const res of r) {
-                            const hit = acceptResult(res, mapPt, v.name, scaleTag, rotTag, decLabel);
+                            const hit = acceptQ2(res, mapPt, v.name, scaleTag, rotTag, decLabel);
                             if (hit) return hit;
                         }
                     }
@@ -2620,76 +2544,21 @@
             if (profile.firstQrPoints) {
                 const q2box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
                 if (q2box) {
-                    recordGeometryCropDebug(q2box, '共通F0 幾何クロップ');
+                    recordGeometryCropDebug(q2box, '即時プリロケート 幾何クロップ');
                     zxingCanvas.width = q2box.sw;
                     zxingCanvas.height = q2box.sh;
                     zxingCtx.drawImage(video, q2box.sx, q2box.sy, q2box.sw, q2box.sh, 0, 0, q2box.sw, q2box.sh);
                     const cd = zxingCtx.getImageData(0, 0, q2box.sw, q2box.sh);
-                    markJsQrCropRect(q2box.sx, q2box.sy, q2box.sw, q2box.sh, '共通F0 幾何クロップ');
+                    markJsQrCropRect(q2box.sx, q2box.sy, q2box.sw, q2box.sh, '即時プリロケート 幾何クロップ');
                     const hitG = tryDecode(cd.data, q2box.sw, q2box.sh,
-                        (x, y) => ({ x: x + q2box.sx, y: y + q2box.sy }), 'geo', 0, '共通F0 幾何クロップ', 'crop');
+                        (x, y) => ({ x: x + q2box.sx, y: y + q2box.sy }), 'geo', 0, '即時プリロケート 幾何クロップ');
                     if (hitG) return hitG;
                 }
             }
 
-            // F1: BarcodeDetectorで位置検出 → 重複bboxを集約してクロップ復号。
-            if (barcodeDetector && ladderOpts.useBarcodeDetector !== false) {
-                try {
-                    const barcodes = await timedDetect('共通F1 BarcodeDetectorクロップ', video);
-                    recordBarcodeDetections('共通F1 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
-                    recordBarcodeBoxes('共通F1 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
-                    const boxes = [];
-                    if (barcodes && barcodes.length) {
-                        for (const b of barcodes) {
-                            if (!b || !b.boundingBox) continue;
-                            const bb = b.boundingBox;
-                            boxes.push({ x: bb.x, y: bb.y, w: bb.width, h: bb.height });
-                        }
-                    }
-                    const merged = [];
-                    for (const box of boxes) {
-                        let hit = null;
-                        for (const m of merged) {
-                            const ix = Math.max(0, Math.min(box.x + box.w, m.x + m.w) - Math.max(box.x, m.x));
-                            const iy = Math.max(0, Math.min(box.y + box.h, m.y + m.h) - Math.max(box.y, m.y));
-                            const minArea = Math.max(1, Math.min(box.w * box.h, m.w * m.h));
-                            if ((ix * iy) / minArea >= 0.55) { hit = m; break; }
-                        }
-                        if (hit) {
-                            const x1 = Math.min(hit.x, box.x), y1 = Math.min(hit.y, box.y);
-                            const x2 = Math.max(hit.x + hit.w, box.x + box.w);
-                            const y2 = Math.max(hit.y + hit.h, box.y + box.h);
-                            hit.x = x1; hit.y = y1; hit.w = x2 - x1; hit.h = y2 - y1;
-                        } else {
-                            merged.push(box);
-                        }
-                    }
-                    merged.sort((a, b) => (b.w * b.h) - (a.w * a.h));
-                    for (const box of merged.slice(0, 3)) {
-                        const pad = Math.max(60, Math.floor(Math.max(box.w, box.h) * 0.6));
-                        const sx = Math.max(0, Math.floor(box.x) - pad);
-                        const sy = Math.max(0, Math.floor(box.y) - pad);
-                        const sw = Math.min(vw - sx, Math.ceil(box.w) + pad * 2);
-                        const sh = Math.min(vh - sy, Math.ceil(box.h) + pad * 2);
-                        if (sw <= 32 || sh <= 32) continue;
-                        zxingCanvas.width = sw;
-                        zxingCanvas.height = sh;
-                        zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-                        const cd = zxingCtx.getImageData(0, 0, sw, sh);
-                        markJsQrCropRect(sx, sy, sw, sh, '共通F1 BarcodeDetectorクロップ');
-                        const hitB = tryDecode(cd.data, sw, sh,
-                            (x, y) => ({ x: x + sx, y: y + sy }), 'bd-crop', 0, '共通F1 BarcodeDetectorクロップ', 'crop');
-                        if (hitB) return hitB;
-                    }
-                } catch (e) { /* ignore */ }
-            }
-
             // ② スケール多重（960,720）× 二値化 × optsList（960は回転保険も）
-            const scales = Array.isArray(ladderOpts.fullScales) ? ladderOpts.fullScales : [960, 720];
+            const scales = [960, 720];
             for (const maxDim of scales) {
-                const fullPhaseLabel = (maxDim >= Math.max(vw, vh))
-                    ? '共通F4 フル解像度全画面jsQR'
-                    : (maxDim === 720 ? '共通F3 縮小720全画面jsQR' : '共通F2 縮小960全画面jsQR');
                 const scale = Math.min(1, maxDim / Math.max(vw, vh));
                 const tw = Math.max(1, Math.round(vw * scale));
                 const th = Math.max(1, Math.round(vh * scale));
@@ -2698,26 +2567,26 @@
                 zxingCtx.drawImage(video, 0, 0, tw, th);
                 const data = zxingCtx.getImageData(0, 0, tw, th);
                 const inv = 1 / scale;
-                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }), maxDim, 0, fullPhaseLabel);
+                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }), maxDim, 0, '即時プリロケート 多変種全画面jsQR');
                 if (hit) return hit;
 
                 // 回転バリアント（960スケール時のみ：方向性ノイズ対策の保険）
-                if (maxDim === 960 && ladderOpts.rotateFull !== false) {
+                if (maxDim === 960) {
                     const rot = rotateRGBA90(data.data, tw, th, 'cw');
                     const hitR = tryDecode(rot.data, rot.width, rot.height, (rx, ry) => {
                         const p = unrotatePoint90(rx, ry, tw, th, 'cw');
                         return { x: p.x * inv, y: p.y * inv };
-                    }, maxDim, 90, fullPhaseLabel);
+                    }, maxDim, 90, '即時プリロケート 多変種全画面jsQR');
                     if (hitR) return hitR;
                 }
             }
 
-            if (target === 'Q2') {
-                recordPrelocateReason(sawOther ? 'Q2なし(第1QR等のみ検出)'
-                    : (sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
-            }
+            recordPrelocateReason(sawOther ? 'Q2なし(第1QR等のみ検出)'
+                : (sawRaw ? '復号失敗(isRaw/RS訂正不可)' : 'QR未検出'));
             return null;
         }
+
+        // ★ Phase D: preLocateQ2InCurrentFrame は runQ2Prelocate へ統合済みのため削除。
 
         // --- カメラ制御 ---
         // ★ ビデオトラック（≒MediaStreamTrack）への参照を保持。
@@ -3274,19 +3143,14 @@
             startCamera();
         });
 
-        function startScanByDigitalSign() {
-            scanStage = 1;
-            digitalSignStage3 = false;
-            statusText.innerText = "電子署名モード: 第1QRを探索中...";
-            startCamera();
-        }
+        // ★ Phase D: startScanByDigitalSign（旧・電子署名モードボタン用）は未使用のため削除。
 
         // --- UI アクション ---
         function showPasswordScreen(previewText = null, waitingText = null) {
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
             
             isScanning = false;
-            twinReadStartedAt = 0; // ★ 中間画面（入力待ち等）では20秒タイマを止め、再開時に再計測
+            twinReadStartedAt = 0; // ★ 中間画面（入力待ち等）では10秒タイマを止め、再開時に再計測
             scanStage = 2;
             statusText.innerText = waitingText || '第1QRを読取済み。パスワード入力待ちです。';
             document.getElementById('qr1PreviewText').innerText = previewText != null
@@ -3300,7 +3164,7 @@
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
             
             isScanning = false;
-            twinReadStartedAt = 0; // ★ 中間画面（入力待ち等）では20秒タイマを止め、再開時に再計測
+            twinReadStartedAt = 0; // ★ 中間画面（入力待ち等）では10秒タイマを止め、再開時に再計測
             scanStage = 2;
             statusText.innerText = '第1QRを読取済み。第2QRのシステム復号へ進みます。';
             document.getElementById('sysEncQr1Text').innerText = firstQR.text;
@@ -3311,7 +3175,7 @@
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
             
             isScanning = false;
-            twinReadStartedAt = 0; // ★ 中間画面（入力待ち等）では20秒タイマを止め、再開時に再計測
+            twinReadStartedAt = 0; // ★ 中間画面（入力待ち等）では10秒タイマを止め、再開時に再計測
             scanStage = 2;
             statusText.innerText = '第1QRを読取済み。パスワードA入力待ちです。';
             document.getElementById('doubleEncQr1Text').innerText = firstQR.text;
@@ -3398,11 +3262,7 @@
             if (!frame || !appMask || !firstQR) return false;
 
             let resList = null;
-            const phaseLabel = useSauvola ? 'appEnc保存フレーム Sauvola jsQR' : 'appEnc保存フレーム native jsQR';
-            let _tAppFrame = 0;
             try {
-                recordJsQrInput(phaseLabel, 'full');
-                _tAppFrame = nowPerf();
                 if (useSauvola) {
                     const bin = buildSauvolaBinaryFromRGBA(frame.data, frame.width, frame.height, 0);
                     resList = jsQR(bin, frame.width, frame.height, {
@@ -3420,9 +3280,7 @@
                         multi: true
                     });
                 }
-                addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tAppFrame, 'jsqr');
             } catch (err) {
-                addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tAppFrame, 'jsqr');
                 console.warn("Stored app encrypted frame decode failed:", err);
                 return false;
             }
@@ -3462,10 +3320,8 @@
                     points: candPts,
                     center: candAdapter.center,
                     codewords: res.codewords,
-                    dataBytes: res.dataBytes,
-                    patternInfo: buildPatternInfo(res)
+                    dataBytes: res.dataBytes
                 };
-                recordQrMeta(1, secondQR, scanMode);
                 isScanning = false;
                 isProcessing = false;
                 pendingAppEncFrame = null;
@@ -3503,10 +3359,8 @@
                         points: savedQ2AppEncData.points,
                         center: savedQ2AppEncData.center,
                         codewords: savedQ2AppEncData.codewords || null,
-                        dataBytes: decoded.dataBytes,
-                        patternInfo: savedQ2AppEncData.patternInfo || null
+                        dataBytes: decoded.dataBytes
                     };
-                    recordQrMeta(1, secondQR, scanMode);
                     isScanning = false;
                     isProcessing = false;
                     pendingAppEncFrame = null;
@@ -3532,21 +3386,39 @@
             // (2b) ★ 同じく Sauvola 版で再試行
             if (finishAppEncFromFrame(currentFrame, true)) return true;
             // (2c) ★ さらに Sauvola 全画面プリロケート（直近フレームの未クロップ版）
-            const _q2PasswordProfile = {
-                kind: 'appenc',
-                winTag: 'appEnc password',
-                optsList: [ { appEncMask: Array.from(appMask), sysEncDecode: true } ],
-                acceptRawAppEnc: false,
+            // ★ Phase D: 旧 preLocateQ2InCurrentFrame を廃し、統一エンジン runQ2Prelocate に集約。
+            //   パスワード既知なので appEncMask 付きで平文(qrNo===1)を取得する（生Eは採用しない）。
+            const _q2Pre = runQ2Prelocate({
+                kind: 'appenc-final',
+                winTag: 'appEnc final',
+                optsList: [ { appEncMask: Array.from(appMask), sysEncDecode: true, captureAppEncDataBytes: true } ],
                 firstQrPoints: getFirstQrGeometryForQ2(),
                 firstQrVersionNumber: firstQR && firstQR.versionNumber
-            };
-            const _q2Pre = await runLadder('Q2', _q2PasswordProfile, {
-                fullScales: Array.from(new Set([960, 720, Math.max(video.videoWidth || 0, video.videoHeight || 0)].filter(Boolean))),
-                rotateFull: true
             });
             if (_q2Pre) {
+                secondQR = {
+                    text: _q2Pre.text,
+                    managementCode: _q2Pre.managementCode,
+                    managementCode32: _q2Pre.managementCode32,
+                    managementFlags16: _q2Pre.managementFlags16,
+                    creationDateTimeExt32: _q2Pre.creationDateTimeExt32,
+                    managementExt32: _q2Pre.managementExt32,
+                    expiryExt32: _q2Pre.expiryExt32,
+                    readerIdExt32: _q2Pre.readerIdExt32,
+                    readLimitBits: _q2Pre.readLimitBits,
+                    qrTwinUniqueId8: _q2Pre.qrTwinUniqueId8,
+                    locationLatExt24: _q2Pre.locationLatExt24,
+                    locationLonExt24: _q2Pre.locationLonExt24,
+                    municipalityExt24: _q2Pre.municipalityExt24,
+                    points: _q2Pre.points,
+                    center: _q2Pre.center,
+                    codewords: _q2Pre.codewords,
+                    dataBytes: _q2Pre.dataBytes
+                };
+                isScanning = false;
+                isProcessing = false;
                 pendingAppEncFrame = null;
-                await dispatchQ2Found(_q2PasswordProfile, _q2Pre, scanMode);
+                showResultScreen();
                 return true;
             }
 
@@ -3812,8 +3684,7 @@
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
 
             isScanning = false;
-            markScanCompleted('completed');
-            twinReadStartedAt = 0; // ★ 完了：20秒タイマ停止
+            twinReadStartedAt = 0; // ★ 完了：10秒タイマ停止
 
             const normalSection = document.getElementById('normalResultSection');
             const dsSection = document.getElementById('digitalSignResultSection');
@@ -6048,7 +5919,7 @@
         async function scanLoop() {
             if (!isScanning) return;
 
-            // ★ 20秒タイムアウト判定（読取開始からの経過）。中間画面中は isScanning=false なので進まない。
+            // ★ 10秒タイムアウト判定（読取開始からの経過）。中間画面中は isScanning=false なので進まない。
             if (!twinReadStartedAt) twinReadStartedAt = nowPerf();
             if (nowPerf() - twinReadStartedAt >= SCAN_TIMEOUT_MS) {
                 handleScanTimeout();
@@ -6360,6 +6231,43 @@
 
                     let detectedItems = [];
 
+                    // ★ Phase B: Stage3のQ2探索を即時プリロケートと同一エンジン(runQ2Prelocate)へ一本化。
+                    //   重いBDクロップ多二値化ラダー(0.5/1.0/1.5/1.6/2.5/2.7/2.8/3)を回さず、
+                    //   1フレーム=1 runQ2Prelocate（幾何+スケール×二値化×回転, 早期終了）で軽量化し実効fpsを上げる。
+                    //   対象は統一Q2探索（システム暗号化 / 電子署名 / ノーマル）。
+                    //   appEncはStage1ループ、appMask再試行・二重暗号化・カラーは従来ラダーのまま。
+                    const _stage3UnifiedQ2 = (scanStage === 3 && firstQR && !secondQR && !appMask
+                        && ((scanMode === 'normal') || (scanMode === 'digital_sign' && digitalSignStage3)));
+                    if (_stage3UnifiedQ2) {
+                        const _s3p = digitalSignStage3
+                            ? { kind: 'digitalsign', winTag: 'digital_sign', optsList: [ {}, { sysEncDecode: true } ] }
+                            : (sysEncStage3
+                                ? { kind: 'sysenc', winTag: 'sysEnc legacy', optsList: [ { sysEncDecode: true } ] }
+                                : { kind: 'normal', winTag: 'normal plain', optsList: [ {} ] });
+                        _s3p.firstQrPoints = getFirstQrGeometryForQ2();
+                        _s3p.firstQrVersionNumber = firstQR && firstQR.versionNumber;
+
+                        const _s3q2 = runQ2Prelocate(_s3p);
+                        if (_s3q2) {
+                            recordQrMeta(1, _s3q2, scanMode);
+                            if (_s3p.kind === 'digitalsign') {
+                                secondQR = { text: _s3q2.text, managementCode: _s3q2.managementCode, points: _s3q2.points, center: _s3q2.center };
+                                await finalizeDigitalSign();
+                                return;
+                            }
+                            // normal / sysenc
+                            secondQR = _s3q2;
+                            isScanning = false;
+                            isProcessing = false;
+                            showResultScreen();
+                            return;
+                        }
+                        // ミス → 重いラダーを回さずこのフレーム終了。次フレームで再試行（実効fps↑）。
+                        isProcessing = false;
+                        if (isScanning) requestAnimationFrame(scanLoop);
+                        return;
+                    }
+
                     // === 通常モード: Stage 1 ===
                     // 二重暗号化モードの Stage 1 ではシステム暗号化された第1QRを探す
                     // → jsQR の sysEncDecode を使う
@@ -6376,41 +6284,6 @@
                     }
 
                     let cropBBox = null;
-                    let skipLegacyLadder = false;
-
-                    if (scanStage === 1) {
-                        skipLegacyLadder = true;
-                        fullScanFrameIdx++;
-                        const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
-                        const q1Scales = [];
-                        if (fullScanFrameIdx % 2 === 0) q1Scales.push(960);
-                        else q1Scales.push(720);
-                        if (maxDim > 0 && fullScanFrameIdx % 8 === 5) q1Scales.push(maxDim);
-                        const ladderHit = await runLadder('Q1', buildQ1ProfileForStage1(), {
-                            fullScales: q1Scales,
-                            rotateFull: true
-                        });
-                        if (ladderHit) detectedItems.push(ladderHit);
-                    } else if (scanStage === 3 && firstQR) {
-                        skipLegacyLadder = true;
-                        fullScanFrameIdx++;
-                        const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
-                        const heavyScales = [];
-                        if (fullScanFrameIdx % 3 === 0) heavyScales.push(960);
-                        else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
-                        if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
-                        const q2Stage3Profile = buildQ2ProfileForStage3();
-                        const ladderHit = await runLadder('Q2', q2Stage3Profile, {
-                            fullScales: heavyScales,
-                            rotateFull: fullScanFrameIdx % 6 === 0
-                        });
-                        if (ladderHit) {
-                            await dispatchQ2Found(q2Stage3Profile, ladderHit, scanMode);
-                            return;
-                        }
-                    }
-
-                    if (!skipLegacyLadder) {
 
                     // --- [フェーズ 0.5 / 高速 Q2 ジオメトリ復号] ---
                     // Stage 1 で確定した firstQR の点情報（4 角）と QR バージョンから、
@@ -7213,8 +7086,6 @@
                         }
                     }
 
-                    }
-
                     // ★ ここで何か検出できていれば AF nudge タイマをリセット（過剰な再フォーカスを防ぐ）
                     if (detectedItems.length > 0) {
                         lastSuccessfulDetectAt = Date.now();
@@ -7321,15 +7192,16 @@
                                     }
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
                                     enterDigitalSignPairScan(1);
-                                    // ★ 電子署名も他の暗号ツインと同様、第1QR検出と同フレームで第2QRを多変種プリロケート。
-                                    //   これが無い（従来）と、電子署名だけ Stage3 反復頼みになり、
-                                    //   720スケール/回転変種でしか読めない twin が読めずタイムアウトしていた。
+                                    // ★ Phase A: 電子署名Q2は平文で確実に読める（sysEncDecodeでは読めない）。
+                                    //   buildTwinProfile が平文優先(optsList=[{},{sysEncDecode}])を返すため、
+                                    //   従来 sysEncDecode 固定で外していた twin を同フレームで救済できる。
                                     recordImmediatePrelocate(true, false, 'digital_sign');
-                                    const _q2ProfileDs = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreDs = await runLadder('Q2', _q2ProfileDs);
+                                    const _q2PreDs = runQ2Prelocate(buildTwinProfile(mgmtInfo));
                                     if (_q2PreDs) {
                                         recordImmediatePrelocate(false, true, 'digital_sign');
-                                        await dispatchQ2Found(_q2ProfileDs, _q2PreDs, 'digital_sign');
+                                        recordQrMeta(1, _q2PreDs, scanMode);
+                                        secondQR = { text: _q2PreDs.text, managementCode: _q2PreDs.managementCode, points: _q2PreDs.points, center: _q2PreDs.center };
+                                        await finalizeDigitalSign();
                                         return;
                                     } else {
                                         recordImmediatePrelocate(false, false, 'digital_sign');
@@ -7415,82 +7287,64 @@
                             }
 
                             if (scanMode === 'normal') {
-                                // ★ 統一モード: 第1QRの管理ビットでツイン種別を自動判別。
-                                //   電子署名ツイン = sysEncFlag=true かつ dataTypeBits===2(署名)。
-                                //   （生成側が第1/第2QR両方に sysEncビット＋署名dataTypeを付与）
-                                if (mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.dataTypeBits === 2) {
-                                    // === 電子署名ツイン（自動判別）→ 既存の電子署名フローへ ===
-                                    scanMode = 'digital_sign'; // 既存の電子署名フェーズ条件/Stage3処理を有効化
+                                // ★ Phase A: ツイン種別を1点(buildTwinProfile)で判定し、全種同一の
+                                //   即時プリロケート(runQ2Prelocate)で第2QRを同フレーム決着させる。
+                                //   電子署名=平文優先 / ユーザ暗号化=多変種(幾何+スケール+回転)。
+                                //   違いは profile（optsList/acceptRawAppEnc）と完了動作(onFound)だけ。
+                                const profile = buildTwinProfile(mgmtInfo);
+
+                                // --- ミス時の継続先（Stage3 等）を kind 別に準備 ---
+                                if (profile.kind === 'digitalsign') {
+                                    scanMode = 'digital_sign'; // 既存の電子署名Stage3処理を有効化
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
                                     enterDigitalSignPairScan(1); // scanStage=3, digitalSignStage3=true, 幾何保存
-                                    // 第1QR検出と同フレームで第2QR（署名・システム暗号化）を多変種プリロケート
-                                    recordImmediatePrelocate(true, false, 'digital_sign');
-                                    const _q2ProfileDs = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreDs = await runLadder('Q2', _q2ProfileDs);
-                                    if (_q2PreDs) {
-                                        recordImmediatePrelocate(false, true, 'digital_sign');
-                                        await dispatchQ2Found(_q2ProfileDs, _q2PreDs, 'digital_sign');
-                                        return;
-                                    } else {
-                                        recordImmediatePrelocate(false, false, 'digital_sign');
-                                    }
-                                } else if (mgmtInfo && mgmtInfo.sysEncFlag) {
+                                } else if (profile.kind === 'sysenc') {
                                     scanStage = 3;
                                     sysEncStage3 = true;
                                     if (firstQR) { preserveFirstQrGeometryForQ2(); ensureFirstCenter(firstQR); firstQR.points = null; }
                                     statusText.innerText = "第2QR（システム暗号化）を探索中...";
-                                    // ★ 第2QR即時プリロケート：第1QR検出と同フレームで第2QRを検索
-                                    //   ── 4–5秒問題の主因（Stage3 ループに入る前に同フレームで決着）
-                                    recordImmediatePrelocate(true, false, 'sysEnc legacy');
-                                    const _q2Profile = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2Pre = await runLadder('Q2', _q2Profile);
-                                    if (_q2Pre) {
-                                        recordImmediatePrelocate(false, true, 'sysEnc legacy');
-                                        await dispatchQ2Found(_q2Profile, _q2Pre, scanMode);
-                                        return;
-                                    } else {
-                                        recordImmediatePrelocate(false, false, 'sysEnc legacy');
-                                    }
-                                } else if (mgmtInfo && mgmtInfo.appEncFlag) {
-                                    // ★ ユーザ暗号化：第2QR を「RS訂正成功で暗号文 E を取得」できた場合のみ
-                                    //   「読取仮成功」とみなしパスワード画面へ遷移する。
-                                    //   取得失敗時はパスワード画面を出さず、scanLoop を自然に次フレームへ
-                                    //   進ませる（return せず continue するだけ）。
-                                    //   次イテレーションで Q1 が再検出されると、再度 preLocateQ2 が試行される。
-                                    //   ※ awaiting フラグや軽量ループ等の特殊状態は導入しない
-                                    //     （UIスレッド占有を防ぐため）。scanLoop の通常リズム
-                                    //     （SCAN_INTERVAL_MS = 40ms + rAF）で安全に再試行される。
+                                } else if (profile.kind === 'appenc') {
                                     capturePendingAppEncFrame();
-                                    recordImmediatePrelocate(true, false, 'appEnc provisional');
-                                    const _q2ProfileApp = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreApp = await runLadder('Q2', _q2ProfileApp);
-                                    if (_q2PreApp) {
-                                        recordImmediatePrelocate(false, true, 'appEnc provisional');
-                                        await dispatchQ2Found(_q2ProfileApp, _q2PreApp, scanMode);
-                                        return;
-                                    }
-                                    recordImmediatePrelocate(false, false, 'appEnc provisional');
-                                    // RS訂正失敗 → パスワード画面を出さず、scanLoopを自然継続。
-                                    // continue で for-of 次アイテムへ。残りがなければループ抜け、
-                                    // scanLoop 末尾の requestAnimationFrame(scanLoop) で次フレーム再試行。
-                                    statusText.innerText = "第2QR取得中... QRをそのままかざし続けてください";
-                                    continue;
+                                    profile.firstQrPoints = getFirstQrGeometryForQ2();
+                                    profile.firstQrVersionNumber = firstQR && firstQR.versionNumber;
                                 } else {
                                     scanStage = 3;
                                     statusText.innerText = "第2QRを探索中...";
-                                    // ★ P0-2: 通常(非暗号)ツインも、第1QR検出と同フレームで第2QRを多変種プリロケート
-                                    //   （復号規則どおり平文。外れたら従来どおり Stage3 ループで継続）
-                                    recordImmediatePrelocate(true, false, 'normal plain');
-                                    const _q2ProfileN = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreN = await runLadder('Q2', _q2ProfileN);
-                                    if (_q2PreN) {
-                                        recordImmediatePrelocate(false, true, 'normal plain');
-                                        await dispatchQ2Found(_q2ProfileN, _q2PreN, scanMode);
-                                        return;
-                                    } else {
-                                        recordImmediatePrelocate(false, false, 'normal plain');
-                                    }
                                 }
+
+                                // --- 統一 即時プリロケート（全種同一エンジン）---
+                                recordImmediatePrelocate(true, false, profile.winTag);
+                                const _q2 = runQ2Prelocate(profile);
+                                if (_q2) {
+                                    recordImmediatePrelocate(false, true, profile.winTag);
+                                    if (profile.kind === 'appenc') {
+                                        // RS訂正成功＝暗号文E取得 → 読取仮成功 → パスワード画面へ
+                                        savedQ2AppEncData = _q2;
+                                        isProcessing = false;
+                                        showPasswordScreen();
+                                        return;
+                                    }
+                                    recordQrMeta(1, _q2, scanMode);
+                                    if (profile.kind === 'digitalsign') {
+                                        secondQR = { text: _q2.text, managementCode: _q2.managementCode, points: _q2.points, center: _q2.center };
+                                        await finalizeDigitalSign();
+                                        return;
+                                    }
+                                    // normal / sysenc
+                                    secondQR = _q2;
+                                    isScanning = false;
+                                    isProcessing = false;
+                                    showResultScreen();
+                                    return;
+                                }
+                                recordImmediatePrelocate(false, false, profile.winTag);
+                                if (profile.kind === 'appenc') {
+                                    // RS訂正失敗 → パスワード画面を出さず scanLoop を自然継続（次フレーム再試行）。
+                                    //   ※ awaiting フラグや軽量ループ等の特殊状態は導入しない（UIスレッド占有を防ぐ）。
+                                    statusText.innerText = "第2QR取得中... QRをそのままかざし続けてください";
+                                    continue;
+                                }
+                                // normal / sysenc / digitalsign: ミス → Stage3 ループへ（このフレーム継続）
                             } else {
                                 // 二重暗号化モード
                                 isProcessing = false;

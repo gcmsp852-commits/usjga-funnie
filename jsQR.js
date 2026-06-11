@@ -408,11 +408,11 @@ function scan(matrix, options) {
                         bottomRightAlignmentPattern: location_1.alignmentPattern,
                     },
                     matrix: matrix,
-                    moduleMatrix: extracted.matrix,
                     isRaw: decoded.isRaw,
                     codewords: decoded.codewords,
                     dataBytes: decoded.dataBytes,
                     formatInfo: decoded.formatInfo,
+                    moduleMatrix: decoded.moduleMatrix, // ★ 計測用: 透視補正後NxNモジュール行列（真の配置指紋）
                     rawMatrixData: decoded.rawMatrixData,
                     versionNumber: decoded.versionNumber,
                     appEncDataBytesEncrypted: decoded.appEncDataBytesEncrypted
@@ -970,6 +970,8 @@ function decodeMatrix(matrix, options) {
         res.versionNumber = version.versionNumber;
         res.codewords = correctedCodewords; // ★ RS訂正済み再インタリーブコード語
         res.dataBytes = Array.from(decodeBytes); // ★ RS訂正済みデータバイト（ECC除く）
+        res.formatInfo = formatInfo;   // ★ 計測用: 復号成功時もマスク/訂正レベルを返す（従来未設定でmask/ECがnullだった）
+        res.moduleMatrix = matrix;     // ★ 計測用: 透視補正後のNxNモジュール行列（真の配置指紋fp/dark/run用）
         if (appEncMask && appEncMask.length > 0) {
             res.appEncDataBytesEncrypted = encryptedDataBytes;
         }
