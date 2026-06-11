@@ -408,7 +408,6 @@ function scan(matrix, options) {
                         bottomRightAlignmentPattern: location_1.alignmentPattern,
                     },
                     matrix: matrix,
-                    moduleMatrix: extracted.matrix,
                     isRaw: decoded.isRaw,
                     codewords: decoded.codewords,
                     dataBytes: decoded.dataBytes,
