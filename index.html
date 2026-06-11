@@ -6482,6 +6482,43 @@
 
                     let detectedItems = [];
 
+                    // ★ Phase B: Stage3のQ2探索を即時プリロケートと同一エンジン(runQ2Prelocate)へ一本化。
+                    //   重いBDクロップ多二値化ラダー(0.5/1.0/1.5/1.6/2.5/2.7/2.8/3)を回さず、
+                    //   1フレーム=1 runQ2Prelocate（幾何+スケール×二値化×回転, 早期終了）で軽量化し実効fpsを上げる。
+                    //   対象は統一Q2探索（システム暗号化 / 電子署名 / ノーマル）。
+                    //   appEncはStage1ループ、appMask再試行・二重暗号化・カラーは従来ラダーのまま。
+                    const _stage3UnifiedQ2 = (scanStage === 3 && firstQR && !secondQR && !appMask
+                        && ((scanMode === 'normal') || (scanMode === 'digital_sign' && digitalSignStage3)));
+                    if (_stage3UnifiedQ2) {
+                        const _s3p = digitalSignStage3
+                            ? { kind: 'digitalsign', winTag: 'digital_sign', optsList: [ {}, { sysEncDecode: true } ] }
+                            : (sysEncStage3
+                                ? { kind: 'sysenc', winTag: 'sysEnc legacy', optsList: [ { sysEncDecode: true } ] }
+                                : { kind: 'normal', winTag: 'normal plain', optsList: [ {} ] });
+                        _s3p.firstQrPoints = getFirstQrGeometryForQ2();
+                        _s3p.firstQrVersionNumber = firstQR && firstQR.versionNumber;
+
+                        const _s3q2 = runQ2Prelocate(_s3p);
+                        if (_s3q2) {
+                            recordQrMeta(1, _s3q2, scanMode);
+                            if (_s3p.kind === 'digitalsign') {
+                                secondQR = { text: _s3q2.text, managementCode: _s3q2.managementCode, points: _s3q2.points, center: _s3q2.center };
+                                await finalizeDigitalSign();
+                                return;
+                            }
+                            // normal / sysenc
+                            secondQR = _s3q2;
+                            isScanning = false;
+                            isProcessing = false;
+                            showResultScreen();
+                            return;
+                        }
+                        // ミス → 重いラダーを回さずこのフレーム終了。次フレームで再試行（実効fps↑）。
+                        isProcessing = false;
+                        if (isScanning) requestAnimationFrame(scanLoop);
+                        return;
+                    }
+
                     // === 通常モード: Stage 1 ===
                     // 二重暗号化モードの Stage 1 ではシステム暗号化された第1QRを探す
                     // → jsQR の sysEncDecode を使う
