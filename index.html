@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader56</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -387,6 +387,7 @@
         let sysEncStage3 = false; // 通常モードでシステム暗号化の第2QR探索中フラグ
         let digitalSignStage3 = false; // 電子署名モードの第2QR（もしくはペア）探索中フラグ
         let lastTwinBBox = null; // ★ Stage 1で検出したツインQRの領域を保存
+        let stage1BdQ2Candidate = null;
         let pendingAppEncFrame = null;
         let savedQ2AppEncData = null;
         const JSQR_CROP_DEBUG_MS = 700;
@@ -1312,6 +1313,8 @@
                 geometryCrops: [],
                 q2Centers: [],
                 barcodeBoxes: [],
+                stage1BdQ2Candidate: null,
+                q2NotRequiredReason: null,
                 qrMeta: {},          // ★ P3: 第1/第2QRのメタ（種類・version・mask・EC・配置パターン）
                 prelocateWin: null,  // ★ P3: 即時プリロケートが当たった変種(スケール×二値化×回転)
                 readOrientation: (typeof readOrientationManual !== 'undefined' ? readOrientationManual : 'portrait'), // ★ 手動選択の読取向き
@@ -1327,6 +1330,7 @@
                 }
             };
             jsQrCropDebugRects = [];
+            stage1BdQ2Candidate = null;
             twinReadStartedAt = 0; // ★ 新しい読取開始：10秒タイマをリセット（scanLoop初回で再設定）
         }
 
@@ -1387,6 +1391,97 @@
 
         function fmtRect(r) {
             return r ? `sx=${fmtNum(r.sx ?? r.x)}, sy=${fmtNum(r.sy ?? r.y)}, sw=${fmtNum(r.sw ?? r.width)}, sh=${fmtNum(r.sh ?? r.height)}` : '-';
+        }
+
+        function rectFromPoints(points) {
+            if (!points || points.length !== 4) return null;
+            const xs = points.map(p => p.x);
+            const ys = points.map(p => p.y);
+            const x = Math.min(...xs), y = Math.min(...ys);
+            const width = Math.max(...xs) - x, height = Math.max(...ys) - y;
+            return { x, y, width, height };
+        }
+
+        function normalizeRect(r) {
+            if (!r) return null;
+            const x = Number(r.x ?? r.sx ?? 0);
+            const y = Number(r.y ?? r.sy ?? 0);
+            const width = Number(r.width ?? r.w ?? r.sw ?? 0);
+            const height = Number(r.height ?? r.h ?? r.sh ?? 0);
+            if (!(width > 0) || !(height > 0)) return null;
+            return { x, y, width, height };
+        }
+
+        function rectCenter(r) {
+            const n = normalizeRect(r);
+            return n ? { x: n.x + n.width / 2, y: n.y + n.height / 2 } : null;
+        }
+
+        function rectOverlapRatio(a, b) {
+            a = normalizeRect(a); b = normalizeRect(b);
+            if (!a || !b) return 0;
+            const ix = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+            const iy = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+            const minArea = Math.max(1, Math.min(a.width * a.height, b.width * b.height));
+            return (ix * iy) / minArea;
+        }
+
+        function cropRectFromBdBox(box) {
+            box = normalizeRect(box);
+            if (!box || !video || !video.videoWidth || !video.videoHeight) return null;
+            const pad = Math.max(60, Math.floor(Math.max(box.width, box.height) * 0.6));
+            const sx = Math.max(0, Math.floor(box.x) - pad);
+            const sy = Math.max(0, Math.floor(box.y) - pad);
+            const sw = Math.min(video.videoWidth - sx, Math.ceil(box.width) + pad * 2);
+            const sh = Math.min(video.videoHeight - sy, Math.ceil(box.height) + pad * 2);
+            return (sw > 32 && sh > 32) ? { sx, sy, sw, sh } : null;
+        }
+
+        function saveStage1BdQ2Candidate(mergedBoxes, q1Points, q1VersionNumber) {
+            stage1BdQ2Candidate = null;
+            const stats = getScanDebugStats();
+            if (!Array.isArray(mergedBoxes) || mergedBoxes.length < 2 || !q1Points || q1Points.length !== 4) return null;
+            const q1Rect = rectFromPoints(q1Points);
+            const q1Center = computeCenterFromPoints(q1Points);
+            const q1Size = q1Rect ? Math.max(q1Rect.width, q1Rect.height) : 0;
+            const geoBox = estimateQ2BBoxFromQ1(q1Points, q1VersionNumber);
+            const geoCenter = geoBox ? { x: geoBox.q2cx, y: geoBox.q2cy } : null;
+            let best = null;
+
+            for (const rawBox of mergedBoxes) {
+                const box = normalizeRect(rawBox);
+                if (!box) continue;
+                const center = rectCenter(box);
+                if (!center) continue;
+                const overlap = rectOverlapRatio(box, q1Rect);
+                const distQ1 = q1Center ? Math.hypot(center.x - q1Center.x, center.y - q1Center.y) : 0;
+                const distGeo = geoCenter ? Math.hypot(center.x - geoCenter.x, center.y - geoCenter.y) : 999999;
+
+                if (overlap >= 0.45) continue;
+                if (q1Size > 0 && distQ1 < q1Size * 0.45) continue;
+
+                const score = distGeo - Math.min(distQ1, q1Size || 0) * 0.1;
+                if (!best || score < best.score) {
+                    best = { box, center, overlap, distQ1, distGeo, score };
+                }
+            }
+
+            if (!best) return null;
+            const crop = cropRectFromBdBox(best.box);
+            if (!crop) return null;
+            stage1BdQ2Candidate = {
+                box: best.box,
+                crop,
+                center: best.center,
+                score: best.score,
+                overlapWithQ1: best.overlap,
+                distFromQ1: best.distQ1,
+                distFromEstimatedQ2: best.distGeo,
+                savedAtFrame: stats.frames.total,
+                used: false
+            };
+            stats.stage1BdQ2Candidate = { ...stage1BdQ2Candidate, box: { ...best.box }, crop: { ...crop } };
+            return stage1BdQ2Candidate;
         }
 
         function limitDebugArray(arr, max = 20) {
@@ -1513,6 +1608,7 @@
 
             lines.push('第1QR 復号成功: ' + formatInput(stats.successByQr && stats.successByQr['0']));
             lines.push('第2QR 復号成功: ' + formatInput(stats.successByQr && stats.successByQr['1']));
+            if (stats.q2NotRequiredReason) lines.push('第2QR不要理由: ' + stats.q2NotRequiredReason);
             const last = stats.lastInput;
             lines.push('最後にjsQRへ渡した画像: ' + (last
                 ? `Stage ${last.stage} / ${last.phase} / ${last.imageType}`
@@ -1524,7 +1620,9 @@
             const totalElapsed = (stats.finishedElapsed != null)
                 ? stats.finishedElapsed
                 : ((stats.startedPerf != null) ? (nowPerf() - stats.startedPerf) : null);
-            const outcomeLabel = stats.outcome === 'timeout' ? 'タイムアウト' : (stats.outcome === 'completed' ? '完了' : '読取中');
+            const outcomeLabel = stats.outcome === 'timeout' ? 'タイムアウト'
+                : (stats.outcome === 'incomplete' ? '未完了'
+                : (stats.outcome === 'completed' ? '完了' : '読取中'));
             const s1Frames = stats.frames.byStage['1'] || 0;
             const s3Frames = stats.frames.byStage['3'] || 0;
             const q2AddFrames = (stats.secondSuccessFrame != null && stats.firstSuccessFrame != null)
@@ -1584,6 +1682,13 @@
                 for (const b of stats.barcodeBoxes) {
                     lines.push(`  Stage ${b.stage} / ${b.phase} / ${b.source} #${b.index}: ${fmtRect(b)}`);
                 }
+            } else {
+                lines.push('  -');
+            }
+            lines.push('Stage1 BD Q2候補');
+            if (stats.stage1BdQ2Candidate) {
+                const c = stats.stage1BdQ2Candidate;
+                lines.push(`  bbox=${fmtRect(c.box)} crop=${fmtRect(c.crop)} overlapQ1=${fmtNum(c.overlapWithQ1)} distQ1=${fmtNum(c.distFromQ1)} distGeo=${fmtNum(c.distFromEstimatedQ2)}`);
             } else {
                 lines.push('  -');
             }
@@ -2586,12 +2691,14 @@
             // RGBA を 二値化{native,Sauvola,Otsu} × optsList で復号し、最初に採用できた Q2 を返す。
             // mapPt(x,y): その画像座標を元動画座標へ写す関数。 scaleTag/rotTag: 当たった変種の記録用。
             const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel, imageType = 'full') => {
-                const variants = [
-                    { name: 'native', d: rgba, pre: false },
-                    { name: 'sauvola', d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true },
-                    { name: 'otsu', d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true }
+                const makeVariants = [
+                    () => ({ name: 'native', d: rgba, pre: false }),
+                    () => ({ name: 'sauvola', d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true }),
+                    () => ({ name: 'otsu', d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true })
                 ];
-                for (const v of variants) {
+                for (const mkVariant of makeVariants) {
+                    let v;
+                    try { v = mkVariant(); } catch (e) { continue; }
                     for (let di = 0; di < optsList.length; di++) {
                         const dopt = optsList[di] || {};
                         const opts = { multi: true, inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre };
@@ -2617,6 +2724,24 @@
             };
 
             // ① 幾何クロップ（appEnc等：Q1座標から Q2 領域のみ切り出し、Q1干渉を除去）
+            if (target === 'Q2' && stage1BdQ2Candidate && !stage1BdQ2Candidate.used) {
+                const c = stage1BdQ2Candidate;
+                c.used = true;
+                const crop = c.crop;
+                if (crop) {
+                    const phase = '共通F0.5 Stage1 BD他方bboxクロップ';
+                    zxingCanvas.width = crop.sw;
+                    zxingCanvas.height = crop.sh;
+                    zxingCtx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh);
+                    const cd = zxingCtx.getImageData(0, 0, crop.sw, crop.sh);
+                    markJsQrCropRect(crop.sx, crop.sy, crop.sw, crop.sh, phase);
+                    const hitS1Bd = tryDecode(cd.data, crop.sw, crop.sh,
+                        (x, y) => ({ x: x + crop.sx, y: y + crop.sy }),
+                        'stage1-bd-other', 0, phase, 'crop');
+                    if (hitS1Bd) return hitS1Bd;
+                }
+            }
+
             if (profile.firstQrPoints) {
                 const q2box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
                 if (q2box) {
@@ -2679,7 +2804,10 @@
                         markJsQrCropRect(sx, sy, sw, sh, '共通F1 BarcodeDetectorクロップ');
                         const hitB = tryDecode(cd.data, sw, sh,
                             (x, y) => ({ x: x + sx, y: y + sy }), 'bd-crop', 0, '共通F1 BarcodeDetectorクロップ', 'crop');
-                        if (hitB) return hitB;
+                        if (hitB) {
+                            if (target === 'Q1') saveStage1BdQ2Candidate(merged, hitB.points, hitB.versionNumber);
+                            return hitB;
+                        }
                     }
                 } catch (e) { /* ignore */ }
             }
@@ -3697,6 +3825,11 @@
             statusText.innerText = "電子署名を検証中...";
 
             // (1) Base64からの復元
+            if (!firstQR || !secondQR || !secondQR.text) {
+                showResultScreen(null, "電子署名の第2QRが未確定です");
+                return;
+            }
+
             let signBytes;
             try {
                 const binaryStr = atob(secondQR.text);
@@ -3812,7 +3945,10 @@
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
 
             isScanning = false;
-            markScanCompleted('completed');
+            const statsForOutcome = getScanDebugStats();
+            const q2MissingForOutcome = !(statsForOutcome.successByQr && statsForOutcome.successByQr['1'])
+                && !statsForOutcome.q2NotRequiredReason;
+            markScanCompleted(q2MissingForOutcome ? 'incomplete' : 'completed');
             twinReadStartedAt = 0; // ★ 完了：10秒タイマ停止
 
             const normalSection = document.getElementById('normalResultSection');
@@ -3919,6 +4055,7 @@
             sysEncStage3 = false;
             digitalSignStage3 = false;
             lastTwinBBox = null;
+            stage1BdQ2Candidate = null;
             currentReadCountRecordedKey = null;
             resetNewColorScanState();
 
@@ -3959,6 +4096,7 @@
             sysEncStage3 = false;
             digitalSignStage3 = false;
             lastTwinBBox = null;
+            stage1BdQ2Candidate = null;
             currentReadCountRecordedKey = null;
             resetNewColorScanState();
             // ★ 防御的リセット：前回スキャン中の状態が残る場合に備える
@@ -7408,6 +7546,7 @@
                             // 同一データフラグ
                             if (mgmtInfo && mgmtInfo.sameDataFlag) {
                                 secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts, center: computeCenterFromPoints(resultPts) };
+                                getScanDebugStats().q2NotRequiredReason = 'sameDataFlag';
                                 isScanning = false;
                                 isProcessing = false;
                                 showResultScreen();
