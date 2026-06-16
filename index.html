@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader77</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2365,8 +2365,9 @@
                 version: (res.versionNumber !== undefined && res.versionNumber !== null) ? res.versionNumber : null,
                 mask: fi ? fi.dataMask : null,
                 ecRaw: fi ? fi.errorCorrectionLevel : null,
-                // QR format info の EC 2bit: 0=M,1=L,2=H,3=Q
-                ec: fi ? (['M', 'L', 'H', 'Q'][fi.errorCorrectionLevel] || '?') : '?',
+                // jsQR formatInfo.errorCorrectionLevel indexes version.errorCorrectionLevels:
+                // 0=L, 1=M, 2=Q, 3=H.
+                ec: fi ? (['L', 'M', 'Q', 'H'][fi.errorCorrectionLevel] || '?') : '?',
                 codewordsLen: res.codewords ? res.codewords.length : (res.dataBytes ? res.dataBytes.length : null),
                 dataLen: (typeof res.data === 'string') ? res.data.length : null
             };
@@ -2530,11 +2531,31 @@
             return { sx: sx, sy: sy, sw: sw, sh: sh, q2cx: q2cx, q2cy: q2cy, q1size: q1size, N: N };
         }
 
+        // ★ ② BD bbox（軸平行矩形・復号前）を Q1 とみなし、ツイン幾何で相方(Q2)領域を概算する。
+        //   現フレームのBD検出に基づくので、Q1確定時に凍結した firstQrPoints よりツインの移動に追従できる。
+        //   回転は無視（bboxは軸平行）するが、estimateQ2BBoxFromQ1 の30%余白が小さな誤差を吸収する。
+        //   縦持ち（既定）では相方は右下方向にずれるため、軸平行擬似コーナー(+x,+y)で向きも一致する。
+        function estimateQ2BBoxFromBdBox(box, versionNumber) {
+            if (!box) return null;
+            const x = (box.x !== undefined) ? box.x : box.sx;
+            const y = (box.y !== undefined) ? box.y : box.sy;
+            const w = (box.w !== undefined) ? box.w : box.sw;
+            const h = (box.h !== undefined) ? box.h : box.sh;
+            if (!(w > 0) || !(h > 0)) return null;
+            const pts = [
+                { x: x,     y: y },
+                { x: x + w, y: y },
+                { x: x + w, y: y + h },
+                { x: x,     y: y + h }
+            ];
+            return estimateQ2BBoxFromQ1(pts, versionNumber);
+        }
+
         // ★ Phase A: ツイン種別 → 第2QRデコード・プロファイルを1点で決定（全種を同一の即時プリロケートに集約）。
         //   違いは「第2QRをどう復号して何を採用するか」だけ。Stage/フェーズ構成は共通。
         //   - normal      : 平文
         //   - sysenc      : sysEncDecode
-        //   - digitalsign : 平文を最優先（署名Q2はjsQRの型式情報誤り訂正で平文復号できる）→保険でsysEncDecode
+        //   - digitalsign : sysEncDecode 一本（旧: 平文→sysEncの2段。実ログ上 平文は一度も当たらず無駄だったため廃止）
         //   - appenc      : sysEncDecode + captureAppEncDataBytes で生暗号文E を捕捉（acceptRawAppEnc）
         function buildTwinProfile(mgmtInfo) {
             if (mgmtInfo && mgmtInfo.appEncFlag) {
@@ -2546,11 +2567,13 @@
                 };
             }
             if (mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.dataTypeBits === 2) {
-                // 電子署名: 第2QR(署名)は平文で確実に読める。sysEncDecodeは保険で後追い。
+                // 電子署名: 第2QR(署名)は sysEncDecode で復号。
+                //   旧: [{}, {sysEncDecode}] の2段だったが、実ログ上 平文は一度も当たらず
+                //   sysEnc のみ成功していたため、平文パスを廃止して per-frame jsQR 回数を半減。
                 return {
                     kind: 'digitalsign',
                     winTag: 'digital_sign',
-                    optsList: [ {}, { sysEncDecode: true } ]
+                    optsList: [ { sysEncDecode: true } ]
                 };
             }
             if (mgmtInfo && mgmtInfo.sysEncFlag) {
@@ -2584,7 +2607,7 @@
                     acceptRawAppEnc: false
                 };
             } else if (scanMode === 'digital_sign' && digitalSignStage3) {
-                profile = { kind: 'digitalsign', winTag: 'digital_sign', optsList: [ {}, { sysEncDecode: true } ] };
+                profile = { kind: 'digitalsign', winTag: 'digital_sign', optsList: [ { sysEncDecode: true } ] }; // ★ ④ sysEnc一本（平文廃止）
             } else if (scanMode === 'normal' && sysEncStage3) {
                 profile = { kind: 'sysenc', winTag: 'sysEnc legacy', optsList: [ { sysEncDecode: true } ] };
             } else {
@@ -2837,6 +2860,23 @@
                         if (hitB) {
                             if (target === 'Q1') saveStage1BdQ2Candidate(merged, hitB.points, hitB.versionNumber, box);
                             return hitB;
+                        }
+                        // ★ ② BD bbox（現フレーム）から相方(Q2)領域を幾何算出してクロップ復号。
+                        //   F0 は凍結した firstQrPoints が基準だが、これは“今フレームのBD bbox”が基準なので
+                        //   ツインが動いてもズレない。Q2探索時のみ（bboxがQ1なら相方=Q2、Q2ならQ1で不採用＝安全）。
+                        if (target === 'Q2') {
+                            const partner = estimateQ2BBoxFromBdBox(box, profile.firstQrVersionNumber);
+                            if (partner) {
+                                const pPhase = '共通F1.5 BD相方クロップ';
+                                zxingCanvas.width = partner.sw;
+                                zxingCanvas.height = partner.sh;
+                                zxingCtx.drawImage(video, partner.sx, partner.sy, partner.sw, partner.sh, 0, 0, partner.sw, partner.sh);
+                                const pd = zxingCtx.getImageData(0, 0, partner.sw, partner.sh);
+                                markJsQrCropRect(partner.sx, partner.sy, partner.sw, partner.sh, pPhase);
+                                const hitP = tryDecode(pd.data, partner.sw, partner.sh,
+                                    (x, y) => ({ x: x + partner.sx, y: y + partner.sy }), 'bd-partner', 0, pPhase, 'crop');
+                                if (hitP) return hitP;
+                            }
                         }
                     }
                 } catch (e) { /* ignore */ }
