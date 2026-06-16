@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader55</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -389,8 +389,6 @@
         let lastTwinBBox = null; // ★ Stage 1で検出したツインQRの領域を保存
         let pendingAppEncFrame = null;
         let savedQ2AppEncData = null;
-        let stage1QrCandidates = [];
-        let pendingStage1Q2 = null;
         const JSQR_CROP_DEBUG_MS = 700;
         let jsQrCropDebugRects = [];
         let scanDebugStats = null;
@@ -1314,10 +1312,6 @@
                 geometryCrops: [],
                 q2Centers: [],
                 barcodeBoxes: [],
-                newAlgorithm: {
-                    stage1Candidates: [],
-                    events: []
-                },
                 qrMeta: {},          // ★ P3: 第1/第2QRのメタ（種類・version・mask・EC・配置パターン）
                 prelocateWin: null,  // ★ P3: 即時プリロケートが当たった変種(スケール×二値化×回転)
                 readOrientation: (typeof readOrientationManual !== 'undefined' ? readOrientationManual : 'portrait'), // ★ 手動選択の読取向き
@@ -1333,8 +1327,6 @@
                 }
             };
             jsQrCropDebugRects = [];
-            stage1QrCandidates = [];
-            pendingStage1Q2 = null;
             twinReadStartedAt = 0; // ★ 新しい読取開始：10秒タイマをリセット（scanLoop初回で再設定）
         }
 
@@ -1450,35 +1442,6 @@
                 });
             }
             limitDebugArray(stats.barcodeBoxes);
-        }
-
-        function recordNewAlgorithmEvent(event, detail = {}) {
-            const stats = getScanDebugStats();
-            if (!stats.newAlgorithm) stats.newAlgorithm = { stage1Candidates: [], events: [] };
-            stats.newAlgorithm.events.push({
-                stage: scanStage,
-                event,
-                at: Date.now(),
-                detail
-            });
-            limitDebugArray(stats.newAlgorithm.events, 40);
-        }
-
-        function recordStage1CandidateDebug(candidate) {
-            if (!candidate) return;
-            const stats = getScanDebugStats();
-            if (!stats.newAlgorithm) stats.newAlgorithm = { stage1Candidates: [], events: [] };
-            stats.newAlgorithm.stage1Candidates.push({
-                id: candidate.id,
-                state: candidate.state || 'unknown',
-                qrNo: candidate.qrNo,
-                score: candidate.score || 0,
-                source: candidate.source || 'stage1-bd',
-                probeStage: candidate.probeStage || null,
-                box: candidate.box ? { ...candidate.box } : null,
-                crop: candidate.crop ? { ...candidate.crop } : null
-            });
-            limitDebugArray(stats.newAlgorithm.stage1Candidates, 40);
         }
 
         function recordQrCorners(qrNo, points) {
@@ -1620,25 +1583,6 @@
             if (stats.barcodeBoxes.length) {
                 for (const b of stats.barcodeBoxes) {
                     lines.push(`  Stage ${b.stage} / ${b.phase} / ${b.source} #${b.index}: ${fmtRect(b)}`);
-                }
-            } else {
-                lines.push('  -');
-            }
-            lines.push('');
-            lines.push('New algorithm candidates');
-            const na = stats.newAlgorithm || {};
-            if (na.stage1Candidates && na.stage1Candidates.length) {
-                for (const c of na.stage1Candidates) {
-                    lines.push(`  #${c.id} ${c.state} qrNo=${c.qrNo ?? '-'} score=${c.score} src=${c.source || '-'} probe=${c.probeStage || '-'} box=${fmtRect(c.box)} crop=${fmtRect(c.crop)}`);
-                }
-            } else {
-                lines.push('  -');
-            }
-            lines.push('New algorithm events');
-            if (na.events && na.events.length) {
-                for (const e of na.events) {
-                    const detail = e.detail ? Object.entries(e.detail).map(([k, v]) => `${k}=${v}`).join(', ') : '';
-                    lines.push(`  Stage ${e.stage} / ${e.event}${detail ? ' / ' + detail : ''}`);
                 }
             } else {
                 lines.push('  -');
@@ -2455,405 +2399,6 @@
             const sh = Math.min(video.videoHeight - sy, Math.ceil(cropSize));
             if (sw <= 32 || sh <= 32) return null;
             return { sx: sx, sy: sy, sw: sw, sh: sh, q2cx: q2cx, q2cy: q2cy, q1size: q1size, N: N };
-        }
-
-        function estimateTwinBBoxFromAnchor(anchorPoints, versionNumber, direction, phase = '') {
-            if (!anchorPoints || anchorPoints.length !== 4) return null;
-            if (!video || !video.videoWidth || !video.videoHeight) return null;
-            const tl = anchorPoints[0], tr = anchorPoints[1], bl = anchorPoints[3];
-            const N = (versionNumber && versionNumber > 0) ? (17 + 4 * versionNumber) : 29;
-            const k = 8.5 / (N - 1);
-            const dxX = (tr.x - tl.x) * k;
-            const dxY = (tr.y - tl.y) * k;
-            const dyX = (bl.x - tl.x) * k;
-            const dyY = (bl.y - tl.y) * k;
-            const cx = anchorPoints.reduce((a, p) => a + p.x, 0) / 4;
-            const cy = anchorPoints.reduce((a, p) => a + p.y, 0) / 4;
-            const sign = direction === 'Q2_TO_Q1' ? -1 : 1;
-            const tcx = cx + sign * (dxX + dyX);
-            const tcy = cy + sign * (dxY + dyY);
-            const xs = anchorPoints.map(p => p.x), ys = anchorPoints.map(p => p.y);
-            const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-            const padding = size * 0.30;
-            const cropSize = size + padding * 2;
-            const sx = Math.max(0, Math.floor(tcx - cropSize / 2));
-            const sy = Math.max(0, Math.floor(tcy - cropSize / 2));
-            const sw = Math.min(video.videoWidth - sx, Math.ceil(cropSize));
-            const sh = Math.min(video.videoHeight - sy, Math.ceil(cropSize));
-            if (sw <= 32 || sh <= 32) return null;
-            const box = { sx, sy, sw, sh, q2cx: tcx, q2cy: tcy, q1size: size, N, direction };
-            if (phase) recordGeometryCropDebug(box, phase);
-            return box;
-        }
-
-        function boxFromBarcodeBoundingBox(bb, padRatio = 0.6, minPad = 60) {
-            if (!bb || !video || !video.videoWidth || !video.videoHeight) return null;
-            const x = bb.x ?? bb.sx ?? 0;
-            const y = bb.y ?? bb.sy ?? 0;
-            const w = bb.width ?? bb.w ?? bb.sw ?? 0;
-            const h = bb.height ?? bb.h ?? bb.sh ?? 0;
-            const pad = Math.max(minPad, Math.floor(Math.max(w, h) * padRatio));
-            const sx = Math.max(0, Math.floor(x) - pad);
-            const sy = Math.max(0, Math.floor(y) - pad);
-            const sw = Math.min(video.videoWidth - sx, Math.ceil(w) + pad * 2);
-            const sh = Math.min(video.videoHeight - sy, Math.ceil(h) + pad * 2);
-            if (sw <= 32 || sh <= 32) return null;
-            return { sx, sy, sw, sh };
-        }
-
-        function mergeBarcodeBoxes(barcodes) {
-            const boxes = [];
-            if (barcodes && barcodes.length) {
-                for (const b of barcodes) {
-                    if (!b || !b.boundingBox) continue;
-                    const bb = b.boundingBox;
-                    boxes.push({ x: bb.x, y: bb.y, width: bb.width, height: bb.height });
-                }
-            }
-            const merged = [];
-            for (const box of boxes) {
-                let hit = null;
-                for (const m of merged) {
-                    const ix = Math.max(0, Math.min(box.x + box.width, m.x + m.width) - Math.max(box.x, m.x));
-                    const iy = Math.max(0, Math.min(box.y + box.height, m.y + m.height) - Math.max(box.y, m.y));
-                    const minArea = Math.max(1, Math.min(box.width * box.height, m.width * m.height));
-                    if ((ix * iy) / minArea >= 0.55) { hit = m; break; }
-                }
-                if (hit) {
-                    const x1 = Math.min(hit.x, box.x), y1 = Math.min(hit.y, box.y);
-                    const x2 = Math.max(hit.x + hit.width, box.x + box.width);
-                    const y2 = Math.max(hit.y + hit.height, box.y + box.height);
-                    hit.x = x1; hit.y = y1; hit.width = x2 - x1; hit.height = y2 - y1;
-                } else {
-                    merged.push(box);
-                }
-            }
-            merged.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-            return merged;
-        }
-
-        function getQrNoFromJsqrResult(res) {
-            if (!res || !res.data || res.isRaw || res.isProbe) return null;
-            const mc32 = (res.managementCode32 !== undefined && res.managementCode32 !== null)
-                ? (res.managementCode32 >>> 0)
-                : getManagementCode32FromParts(res.managementCode, res.managementFlags16);
-            const info = parseStandardMgmt(mc32);
-            return info ? info.qrNo : null;
-        }
-
-        function buildBroadQ2ProbeProfile() {
-            return {
-                kind: 'q2-broad-probe',
-                winTag: 'stage1 broad q2',
-                optsList: [
-                    {},
-                    { sysEncDecode: true },
-                    { sysEncDecode: true, captureAppEncDataBytes: true }
-                ],
-                acceptRawAppEnc: true
-            };
-        }
-
-        function decodeCropForTarget(target, profile, crop, phaseLabel, sourceTag = 'crop', opts = {}) {
-            if (!crop || !video || !video.videoWidth || !video.videoHeight) return null;
-            if (!profile) profile = { optsList: [ {} ] };
-            const wantQrNo = target === 'Q1' ? 0 : 1;
-            const optsList = (profile.optsList && profile.optsList.length) ? profile.optsList : [ {} ];
-            zxingCanvas.width = crop.sw;
-            zxingCanvas.height = crop.sh;
-            zxingCtx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh);
-            const imageData = zxingCtx.getImageData(0, 0, crop.sw, crop.sh);
-            markJsQrCropRect(crop.sx, crop.sy, crop.sw, crop.sh, phaseLabel);
-            const variants = [
-                { name: 'native', data: imageData.data, pre: false },
-                { name: 'sauvola', data: buildSauvolaBinaryFromRGBA(imageData.data, crop.sw, crop.sh, 0), pre: true },
-                { name: 'otsu', data: buildOtsuBinaryFromRGBA(imageData.data, crop.sw, crop.sh), pre: true }
-            ];
-            let bestProbe = null;
-            for (const variant of variants) {
-                for (const dopt of optsList) {
-                    const decOpts = {
-                        multi: true,
-                        inversionAttempts: QR_INV_PRIMARY,
-                        preBinarized: variant.pre
-                    };
-                    if (dopt.sysEncDecode) decOpts.sysEncDecode = true;
-                    if (dopt.appEncMask) decOpts.appEncMask = dopt.appEncMask;
-                    if (dopt.captureAppEncDataBytes) decOpts.captureAppEncDataBytes = true;
-                    if (opts.allowProbe || profile.acceptRawAppEnc) {
-                        decOpts.extractRawForFailed = true;
-                        decOpts.probe = true;
-                    }
-                    recordJsQrInput(phaseLabel, sourceTag);
-                    const t0 = nowPerf();
-                    let list = null;
-                    try { list = jsQR(variant.data, crop.sw, crop.sh, decOpts); }
-                    catch (e) { addPhaseElapsed(scanStage, phaseLabel, nowPerf() - t0, 'jsqr'); continue; }
-                    addPhaseElapsed(scanStage, phaseLabel, nowPerf() - t0, 'jsqr');
-                    if (list && !Array.isArray(list)) list = [list];
-                    if (!list || !list.length) continue;
-                    for (const res of list) {
-                        if (!res) continue;
-                        const mapPt = (x, y) => ({ x: x + crop.sx, y: y + crop.sy });
-                        if (target === 'Q2' && profile.acceptRawAppEnc) {
-                            const hasBytes = res.dataBytes && res.dataBytes.length;
-                            const looksRaw = hasBytes && (res.isRaw || !res.data || res.data === '');
-                            if (looksRaw) {
-                                const item = makeDetectedItemForRawQ2(res, mapPt, recordJsQrSuccess(1));
-                                getScanDebugStats().prelocateWin = `${phaseLabel}, bin=${variant.name}, dec=${dopt.sysEncDecode ? 'sysenc' : 'plain'}, raw`;
-                                recordNewAlgorithmEvent('q2_raw_hit', { phase: phaseLabel });
-                                return item;
-                            }
-                        }
-                        const qrNo = getQrNoFromJsqrResult(res);
-                        if (qrNo === wantQrNo) {
-                            const item = makeDetectedItem(res, mapPt, recordJsQrSuccess(wantQrNo));
-                            getScanDebugStats().prelocateWin = `${phaseLabel}, bin=${variant.name}, dec=${dopt.sysEncDecode ? 'sysenc' : 'plain'}`;
-                            recordNewAlgorithmEvent(target.toLowerCase() + '_hit', { phase: phaseLabel, qrNo });
-                            return item;
-                        }
-                        if ((res.isRaw || res.isProbe || res.formatInfo || res.versionNumber) && !bestProbe) {
-                            bestProbe = { res, variant: variant.name, dec: dopt.sysEncDecode ? 'sysenc' : 'plain' };
-                        }
-                    }
-                }
-            }
-            if (opts.returnProbe) return { probe: bestProbe };
-            return null;
-        }
-
-        function makeDetectedItemForRawQ2(res, mapPt, debugInput) {
-            const L = res.location;
-            const pts = L ? [
-                mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
-                mapPt(L.topRightCorner.x, L.topRightCorner.y),
-                mapPt(L.bottomRightCorner.x, L.bottomRightCorner.y),
-                mapPt(L.bottomLeftCorner.x, L.bottomLeftCorner.y)
-            ] : [];
-            return {
-                _debugInput: debugInput || null,
-                text: null,
-                data: null,
-                patternInfo: buildPatternInfo(res),
-                encryptedDataBytes: res.dataBytes ? Array.from(res.dataBytes) : [],
-                rawData: {
-                    encryptedDataBytes: res.dataBytes ? Array.from(res.dataBytes) : [],
-                    dataBytes: res.dataBytes ? Array.from(res.dataBytes) : [],
-                    version: res.version,
-                    versionNumber: res.versionNumber,
-                    formatInfo: res.formatInfo
-                },
-                codewords: res.correctedCodewords || res.codewords || null,
-                dataBytes: res.dataBytes,
-                versionNumber: res.versionNumber,
-                points: pts,
-                center: computeCenterFromPoints(pts)
-            };
-        }
-
-        function decodeStage1BarcodeCandidate(box, idx) {
-            const crop = boxFromBarcodeBoundingBox(box);
-            if (!crop) return null;
-            const phaseLabel = '新F1 Stage1 BD bbox + jsQR/probe';
-            zxingCanvas.width = crop.sw;
-            zxingCanvas.height = crop.sh;
-            zxingCtx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh);
-            const imageData = zxingCtx.getImageData(0, 0, crop.sw, crop.sh);
-            markJsQrCropRect(crop.sx, crop.sy, crop.sw, crop.sh, phaseLabel);
-            const variants = [
-                { name: 'native', data: imageData.data, pre: false },
-                { name: 'sauvola', data: buildSauvolaBinaryFromRGBA(imageData.data, crop.sw, crop.sh, 0), pre: true },
-                { name: 'otsu', data: buildOtsuBinaryFromRGBA(imageData.data, crop.sw, crop.sh), pre: true }
-            ];
-            const broadOpts = [
-                {},
-                { sysEncDecode: true },
-                { sysEncDecode: true, captureAppEncDataBytes: true }
-            ];
-            let best = {
-                id: idx,
-                source: 'stage1-bd',
-                state: 'bd-only',
-                score: 10,
-                qrNo: null,
-                box,
-                crop,
-                points: null,
-                item: null,
-                raw: null,
-                probeStage: null
-            };
-            for (const variant of variants) {
-                for (const dopt of broadOpts) {
-                    const decOpts = {
-                        multi: true,
-                        inversionAttempts: QR_INV_PRIMARY,
-                        preBinarized: variant.pre,
-                        extractRawForFailed: true,
-                        probe: true
-                    };
-                    if (dopt.sysEncDecode) decOpts.sysEncDecode = true;
-                    if (dopt.captureAppEncDataBytes) decOpts.captureAppEncDataBytes = true;
-                    recordJsQrInput(phaseLabel, 'crop');
-                    const t0 = nowPerf();
-                    let list = null;
-                    try { list = jsQR(variant.data, crop.sw, crop.sh, decOpts); }
-                    catch (e) { addPhaseElapsed(scanStage, phaseLabel, nowPerf() - t0, 'jsqr'); continue; }
-                    addPhaseElapsed(scanStage, phaseLabel, nowPerf() - t0, 'jsqr');
-                    if (list && !Array.isArray(list)) list = [list];
-                    if (!list || !list.length) continue;
-                    for (const res of list) {
-                        if (!res || !res.location) continue;
-                        const mapPt = (x, y) => ({ x: x + crop.sx, y: y + crop.sy });
-                        const pts = [
-                            mapPt(res.location.topLeftCorner.x, res.location.topLeftCorner.y),
-                            mapPt(res.location.topRightCorner.x, res.location.topRightCorner.y),
-                            mapPt(res.location.bottomRightCorner.x, res.location.bottomRightCorner.y),
-                            mapPt(res.location.bottomLeftCorner.x, res.location.bottomLeftCorner.y)
-                        ];
-                        const qrNo = getQrNoFromJsqrResult(res);
-                        if (qrNo === 0 || qrNo === 1) {
-                            const debugInput = recordJsQrSuccess(qrNo);
-                            return {
-                                id: idx,
-                                source: 'stage1-bd',
-                                state: qrNo === 0 ? 'decoded-q1' : 'decoded-q2',
-                                score: 100,
-                                qrNo,
-                                box,
-                                crop,
-                                points: pts,
-                                item: makeDetectedItem(res, mapPt, debugInput),
-                                raw: null,
-                                probeStage: 'payload',
-                                decode: { bin: variant.name, sysEnc: !!dopt.sysEncDecode }
-                            };
-                        }
-                        if (res.isRaw && (res.dataBytes || res.codewords) && best.score < 70) {
-                            best = {
-                                id: idx,
-                                source: 'stage1-bd',
-                                state: 'raw-qr',
-                                score: 70,
-                                qrNo: null,
-                                box,
-                                crop,
-                                points: pts,
-                                item: null,
-                                raw: res,
-                                probeStage: res.formatInfo ? 'format-codewords-rs-failed' : 'raw',
-                                decode: { bin: variant.name, sysEnc: !!dopt.sysEncDecode }
-                            };
-                        } else if ((res.isProbe || res.formatInfo || res.versionNumber) && best.score < 40) {
-                            best = {
-                                id: idx,
-                                source: 'stage1-bd',
-                                state: 'probe-qr',
-                                score: 40,
-                                qrNo: null,
-                                box,
-                                crop,
-                                points: pts,
-                                item: null,
-                                raw: res,
-                                probeStage: res.probeStage || (res.formatInfo ? 'format' : 'locator_extract'),
-                                decode: { bin: variant.name, sysEnc: !!dopt.sysEncDecode }
-                            };
-                        }
-                    }
-                }
-            }
-            return best;
-        }
-
-        async function runStage1NewAlgorithm() {
-            const phaseLabel = '新F1 Stage1 BarcodeDetector bbox検出';
-            stage1QrCandidates = [];
-            pendingStage1Q2 = null;
-            if (!barcodeDetector) {
-                recordNewAlgorithmEvent('stage1_no_barcodedetector');
-                return null;
-            }
-            let barcodes = null;
-            try {
-                barcodes = await timedDetect(phaseLabel, video);
-            } catch (e) {
-                recordNewAlgorithmEvent('stage1_bd_error');
-                return null;
-            }
-            recordBarcodeDetections(phaseLabel, barcodes ? barcodes.length : 0);
-            recordBarcodeBoxes(phaseLabel, barcodes, scanStage, 'video');
-            const boxes = mergeBarcodeBoxes(barcodes).slice(0, 4);
-            recordNewAlgorithmEvent('stage1_bd_boxes', { count: boxes.length });
-            for (let i = 0; i < boxes.length; i++) {
-                const candidate = decodeStage1BarcodeCandidate(boxes[i], i);
-                if (!candidate) continue;
-                stage1QrCandidates.push(candidate);
-                recordStage1CandidateDebug(candidate);
-            }
-            const q1 = stage1QrCandidates.find(c => c.qrNo === 0 && c.item);
-            const q2 = stage1QrCandidates.find(c => c.qrNo === 1 && c.item);
-            if (q2) pendingStage1Q2 = q2.item;
-            if (q1) {
-                recordNewAlgorithmEvent('stage1_q1_decoded', { candidate: q1.id, other: q2 ? q2.id : '-' });
-                return q1.item;
-            }
-            if (q2 && q2.points) {
-                recordNewAlgorithmEvent('stage1_q2_first', { candidate: q2.id });
-                const q1box = estimateTwinBBoxFromAnchor(q2.points, q2.item && q2.item.versionNumber, 'Q2_TO_Q1', '新F1 Q2座標からQ1推定クロップ');
-                const q1hit = decodeCropForTarget('Q1', buildQ1ProfileForStage1(), q1box, '新F1 Q2座標からQ1推定クロップ', 'crop');
-                if (q1hit) return q1hit;
-            }
-            const unknowns = stage1QrCandidates
-                .filter(c => !c.item && c.points && c.score >= 40)
-                .sort((a, b) => b.score - a.score);
-            for (const c of unknowns) {
-                recordNewAlgorithmEvent('unknown_as_q2_hypothesis', { candidate: c.id, state: c.state });
-                const q1box = estimateTwinBBoxFromAnchor(c.points, null, 'Q2_TO_Q1', '新F1 未識別候補Q2仮説→Q1推定');
-                const q1hit = decodeCropForTarget('Q1', buildQ1ProfileForStage1(), q1box, '新F1 未識別候補Q2仮説→Q1推定', 'crop');
-                if (q1hit) return q1hit;
-
-                recordNewAlgorithmEvent('unknown_as_q1_hypothesis', { candidate: c.id, state: c.state });
-                const q2box = estimateTwinBBoxFromAnchor(c.points, null, 'Q1_TO_Q2', '新F2 未識別候補Q1仮説→Q2推定');
-                const q2hit = decodeCropForTarget('Q2', buildBroadQ2ProbeProfile(), q2box, '新F2 未識別候補Q1仮説→Q2推定', 'crop', { allowProbe: true });
-                if (q2hit && q2hit.points && q2hit.points.length === 4) {
-                    pendingStage1Q2 = q2hit;
-                    const q1box2 = estimateTwinBBoxFromAnchor(q2hit.points, q2hit.versionNumber, 'Q2_TO_Q1', '新F1 Q2確定後→Q1推定');
-                    const q1hit2 = decodeCropForTarget('Q1', buildQ1ProfileForStage1(), q1box2, '新F1 Q2確定後→Q1推定', 'crop');
-                    if (q1hit2) return q1hit2;
-                }
-            }
-            return null;
-        }
-
-        async function runQ2AfterQ1New(profile, opts = {}) {
-            const useStage1Candidates = opts.useStage1Candidates !== false;
-            const useGeometry = opts.useGeometry !== false;
-            if (pendingStage1Q2) {
-                recordNewAlgorithmEvent('q2_from_stage1_decoded_bbox');
-                const q2 = pendingStage1Q2;
-                pendingStage1Q2 = null;
-                return q2;
-            }
-            if (useStage1Candidates && stage1QrCandidates && stage1QrCandidates.length) {
-                const others = stage1QrCandidates
-                    .filter(c => c.qrNo !== 0 && c.crop)
-                    .sort((a, b) => b.score - a.score);
-                for (const c of others) {
-                    recordNewAlgorithmEvent('q2_try_other_bbox', { candidate: c.id, state: c.state, score: c.score });
-                    const hit = decodeCropForTarget('Q2', profile, c.crop, '新F1 即時 Stage1他方bboxクロップ', 'crop', { allowProbe: true });
-                    if (hit) return hit;
-                }
-            }
-            if (useGeometry) {
-                const seed = profile && profile.firstQrPoints ? profile.firstQrPoints : getFirstQrGeometryForQ2();
-                const box = estimateTwinBBoxFromAnchor(seed, profile && profile.firstQrVersionNumber, 'Q1_TO_Q2', '新F2 即時 Q1座標→Q2推定クロップ');
-                recordNewAlgorithmEvent('q2_try_q1_geometry', { hasBox: !!box });
-                const hit = decodeCropForTarget('Q2', profile, box, '新F2 即時 Q1座標→Q2推定クロップ', 'crop', { allowProbe: true });
-                if (hit) return hit;
-            }
-            recordPrelocateReason('new-algorithm q2 not found');
-            return null;
         }
 
         // ★ Phase A: ツイン種別 → 第2QRデコード・プロファイルを1点で決定（全種を同一の即時プリロケートに集約）。
@@ -4369,8 +3914,6 @@
             appMask = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
-            stage1QrCandidates = [];
-            pendingStage1Q2 = null;
             resetScanDebugStats();
             resetColorScanResult();
             sysEncStage3 = false;
@@ -4411,8 +3954,6 @@
             appMask = null;
             pendingAppEncFrame = null;
             savedQ2AppEncData = null;
-            stage1QrCandidates = [];
-            pendingStage1Q2 = null;
             resetScanDebugStats();
             resetColorScanResult();
             sysEncStage3 = false;
@@ -6840,15 +6381,28 @@
                     if (scanStage === 1) {
                         skipLegacyLadder = true;
                         fullScanFrameIdx++;
-                        const stage1Hit = await runStage1NewAlgorithm();
-                        if (stage1Hit) detectedItems.push(stage1Hit);
+                        const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
+                        const q1Scales = [];
+                        if (fullScanFrameIdx % 2 === 0) q1Scales.push(960);
+                        else q1Scales.push(720);
+                        if (maxDim > 0 && fullScanFrameIdx % 8 === 5) q1Scales.push(maxDim);
+                        const ladderHit = await runLadder('Q1', buildQ1ProfileForStage1(), {
+                            fullScales: q1Scales,
+                            rotateFull: true
+                        });
+                        if (ladderHit) detectedItems.push(ladderHit);
                     } else if (scanStage === 3 && firstQR) {
                         skipLegacyLadder = true;
                         fullScanFrameIdx++;
+                        const maxDim = Math.max(video.videoWidth || 0, video.videoHeight || 0);
+                        const heavyScales = [];
+                        if (fullScanFrameIdx % 3 === 0) heavyScales.push(960);
+                        else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
+                        if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
                         const q2Stage3Profile = buildQ2ProfileForStage3();
-                        const ladderHit = await runQ2AfterQ1New(q2Stage3Profile, {
-                            useStage1Candidates: false,
-                            useGeometry: true
+                        const ladderHit = await runLadder('Q2', q2Stage3Profile, {
+                            fullScales: heavyScales,
+                            rotateFull: fullScanFrameIdx % 6 === 0
                         });
                         if (ladderHit) {
                             await dispatchQ2Found(q2Stage3Profile, ladderHit, scanMode);
@@ -7772,7 +7326,7 @@
                                     //   720スケール/回転変種でしか読めない twin が読めずタイムアウトしていた。
                                     recordImmediatePrelocate(true, false, 'digital_sign');
                                     const _q2ProfileDs = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreDs = await runQ2AfterQ1New(_q2ProfileDs);
+                                    const _q2PreDs = await runLadder('Q2', _q2ProfileDs);
                                     if (_q2PreDs) {
                                         recordImmediatePrelocate(false, true, 'digital_sign');
                                         await dispatchQ2Found(_q2ProfileDs, _q2PreDs, 'digital_sign');
@@ -7872,7 +7426,7 @@
                                     // 第1QR検出と同フレームで第2QR（署名・システム暗号化）を多変種プリロケート
                                     recordImmediatePrelocate(true, false, 'digital_sign');
                                     const _q2ProfileDs = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreDs = await runQ2AfterQ1New(_q2ProfileDs);
+                                    const _q2PreDs = await runLadder('Q2', _q2ProfileDs);
                                     if (_q2PreDs) {
                                         recordImmediatePrelocate(false, true, 'digital_sign');
                                         await dispatchQ2Found(_q2ProfileDs, _q2PreDs, 'digital_sign');
@@ -7889,7 +7443,7 @@
                                     //   ── 4–5秒問題の主因（Stage3 ループに入る前に同フレームで決着）
                                     recordImmediatePrelocate(true, false, 'sysEnc legacy');
                                     const _q2Profile = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2Pre = await runQ2AfterQ1New(_q2Profile);
+                                    const _q2Pre = await runLadder('Q2', _q2Profile);
                                     if (_q2Pre) {
                                         recordImmediatePrelocate(false, true, 'sysEnc legacy');
                                         await dispatchQ2Found(_q2Profile, _q2Pre, scanMode);
@@ -7909,7 +7463,7 @@
                                     capturePendingAppEncFrame();
                                     recordImmediatePrelocate(true, false, 'appEnc provisional');
                                     const _q2ProfileApp = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreApp = await runQ2AfterQ1New(_q2ProfileApp);
+                                    const _q2PreApp = await runLadder('Q2', _q2ProfileApp);
                                     if (_q2PreApp) {
                                         recordImmediatePrelocate(false, true, 'appEnc provisional');
                                         await dispatchQ2Found(_q2ProfileApp, _q2PreApp, scanMode);
@@ -7928,7 +7482,7 @@
                                     //   （復号規則どおり平文。外れたら従来どおり Stage3 ループで継続）
                                     recordImmediatePrelocate(true, false, 'normal plain');
                                     const _q2ProfileN = buildQ2ProfileForFirst(mgmtInfo);
-                                    const _q2PreN = await runQ2AfterQ1New(_q2ProfileN);
+                                    const _q2PreN = await runLadder('Q2', _q2ProfileN);
                                     if (_q2PreN) {
                                         recordImmediatePrelocate(false, true, 'normal plain');
                                         await dispatchQ2Found(_q2ProfileN, _q2PreN, scanMode);

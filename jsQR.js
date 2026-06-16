@@ -365,19 +365,6 @@ function scan(matrix, options) {
         var location_1 = locations_1[_i];
         var extracted = extractor_1.extract(matrix, location_1);
         var decoded = decoder_1.decode(extracted.matrix, options);
-        if (!decoded && options && options.probe) {
-            decoded = {
-                isProbe: true,
-                probeStage: "locator_extract",
-                version: null,
-                versionNumber: null,
-                formatInfo: null,
-                codewords: null,
-                bytes: null,
-                text: null,
-                chunks: []
-            };
-        }
         if (decoded) {
             var res = void 0;
             if (options && options.extractRawOnly) {
@@ -423,8 +410,6 @@ function scan(matrix, options) {
                     matrix: matrix,
                     moduleMatrix: extracted.matrix,
                     isRaw: decoded.isRaw,
-                    isProbe: decoded.isProbe,
-                    probeStage: decoded.probeStage,
                     codewords: decoded.codewords,
                     dataBytes: decoded.dataBytes,
                     formatInfo: decoded.formatInfo,
@@ -467,7 +452,6 @@ function jsQR(data, width, height, providedOptions) {
         extractRawOnly: providedOptions.extractRawOnly,
         multi: providedOptions.multi,
         extractRawForFailed: providedOptions.extractRawForFailed,
-        probe: providedOptions.probe,
         captureAppEncDataBytes: providedOptions.captureAppEncDataBytes,
         sysEncDecode: providedOptions.sysEncDecode,
         preBinarized: providedOptions.preBinarized,
