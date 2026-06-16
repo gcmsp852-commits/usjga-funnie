@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader11</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1437,50 +1437,71 @@
             return (sw > 32 && sh > 32) ? { sx, sy, sw, sh } : null;
         }
 
-        function saveStage1BdQ2Candidate(mergedBoxes, q1Points, q1VersionNumber) {
+        function saveStage1BdQ2Candidate(mergedBoxes, q1Points, q1VersionNumber, q1BdBox = null) {
             stage1BdQ2Candidate = null;
             const stats = getScanDebugStats();
-            if (!Array.isArray(mergedBoxes) || mergedBoxes.length < 2 || !q1Points || q1Points.length !== 4) return null;
+            if (!Array.isArray(mergedBoxes) || mergedBoxes.length < 1 || !q1Points || q1Points.length !== 4) return null;
             const q1Rect = rectFromPoints(q1Points);
             const q1Center = computeCenterFromPoints(q1Points);
             const q1Size = q1Rect ? Math.max(q1Rect.width, q1Rect.height) : 0;
+            const q1Box = normalizeRect(q1BdBox);
             const geoBox = estimateQ2BBoxFromQ1(q1Points, q1VersionNumber);
             const geoCenter = geoBox ? { x: geoBox.q2cx, y: geoBox.q2cy } : null;
-            let best = null;
+            const candidates = [];
 
-            for (const rawBox of mergedBoxes) {
+            for (const rawBox of mergedBoxes.slice(0, 3)) {
                 const box = normalizeRect(rawBox);
                 if (!box) continue;
                 const center = rectCenter(box);
                 if (!center) continue;
+                const crop = cropRectFromBdBox(box);
+                if (!crop) continue;
                 const overlap = rectOverlapRatio(box, q1Rect);
+                const overlapWithQ1Bd = rectOverlapRatio(box, q1Box);
                 const distQ1 = q1Center ? Math.hypot(center.x - q1Center.x, center.y - q1Center.y) : 0;
                 const distGeo = geoCenter ? Math.hypot(center.x - geoCenter.x, center.y - geoCenter.y) : 999999;
 
-                if (overlap >= 0.45) continue;
-                if (q1Size > 0 && distQ1 < q1Size * 0.45) continue;
-
-                const score = distGeo - Math.min(distQ1, q1Size || 0) * 0.1;
-                if (!best || score < best.score) {
-                    best = { box, center, overlap, distQ1, distGeo, score };
-                }
+                const sizeBase = q1Size || Math.max(box.width, box.height) || 300;
+                const q1OverlapPenalty = overlap * sizeBase * 1.2;
+                const sameBdPenalty = overlapWithQ1Bd * sizeBase * 1.5;
+                const nearQ1Penalty = (q1Size > 0 && distQ1 < q1Size * 0.45) ? (q1Size * 0.45 - distQ1) * 1.5 : 0;
+                const farFromQ1Bonus = Math.min(distQ1, sizeBase) * 0.1;
+                const score = distGeo + q1OverlapPenalty + sameBdPenalty + nearQ1Penalty - farFromQ1Bonus;
+                candidates.push({
+                    box,
+                    crop,
+                    center,
+                    score,
+                    overlapWithQ1: overlap,
+                    overlapWithQ1Bd,
+                    distFromQ1: distQ1,
+                    distFromEstimatedQ2: distGeo,
+                    used: false
+                });
             }
 
-            if (!best) return null;
-            const crop = cropRectFromBdBox(best.box);
-            if (!crop) return null;
+            if (!candidates.length) return null;
+            candidates.sort((a, b) => a.score - b.score);
             stage1BdQ2Candidate = {
-                box: best.box,
-                crop,
-                center: best.center,
-                score: best.score,
-                overlapWithQ1: best.overlap,
-                distFromQ1: best.distQ1,
-                distFromEstimatedQ2: best.distGeo,
+                candidates,
+                count: candidates.length,
                 savedAtFrame: stats.frames.total,
                 used: false
             };
-            stats.stage1BdQ2Candidate = { ...stage1BdQ2Candidate, box: { ...best.box }, crop: { ...crop } };
+            stats.stage1BdQ2Candidate = {
+                count: candidates.length,
+                savedAtFrame: stage1BdQ2Candidate.savedAtFrame,
+                candidates: candidates.map(c => ({
+                    box: { ...c.box },
+                    crop: { ...c.crop },
+                    center: { ...c.center },
+                    score: c.score,
+                    overlapWithQ1: c.overlapWithQ1,
+                    overlapWithQ1Bd: c.overlapWithQ1Bd,
+                    distFromQ1: c.distFromQ1,
+                    distFromEstimatedQ2: c.distFromEstimatedQ2
+                }))
+            };
             return stage1BdQ2Candidate;
         }
 
@@ -1688,7 +1709,10 @@
             lines.push('Stage1 BD Q2候補');
             if (stats.stage1BdQ2Candidate) {
                 const c = stats.stage1BdQ2Candidate;
-                lines.push(`  bbox=${fmtRect(c.box)} crop=${fmtRect(c.crop)} overlapQ1=${fmtNum(c.overlapWithQ1)} distQ1=${fmtNum(c.distFromQ1)} distGeo=${fmtNum(c.distFromEstimatedQ2)}`);
+                const candidates = Array.isArray(c.candidates) ? c.candidates : [c];
+                candidates.forEach((cand, idx) => {
+                    lines.push(`  #${idx + 1} bbox=${fmtRect(cand.box)} crop=${fmtRect(cand.crop)} score=${fmtNum(cand.score)} overlapQ1=${fmtNum(cand.overlapWithQ1)} overlapQ1BD=${fmtNum(cand.overlapWithQ1Bd)} distQ1=${fmtNum(cand.distFromQ1)} distGeo=${fmtNum(cand.distFromEstimatedQ2)}`);
+                });
             } else {
                 lines.push('  -');
             }
@@ -2725,10 +2749,16 @@
 
             // ① 幾何クロップ（appEnc等：Q1座標から Q2 領域のみ切り出し、Q1干渉を除去）
             if (target === 'Q2' && stage1BdQ2Candidate && !stage1BdQ2Candidate.used) {
-                const c = stage1BdQ2Candidate;
-                c.used = true;
-                const crop = c.crop;
-                if (crop) {
+                stage1BdQ2Candidate.used = true;
+                const candidates = Array.isArray(stage1BdQ2Candidate.candidates)
+                    ? stage1BdQ2Candidate.candidates
+                    : [stage1BdQ2Candidate];
+                for (let ci = 0; ci < candidates.length; ci++) {
+                    const c = candidates[ci];
+                    if (!c || c.used) continue;
+                    c.used = true;
+                    const crop = c.crop;
+                    if (!crop) continue;
                     const phase = '共通F0.5 Stage1 BD他方bboxクロップ';
                     zxingCanvas.width = crop.sw;
                     zxingCanvas.height = crop.sh;
@@ -2737,7 +2767,7 @@
                     markJsQrCropRect(crop.sx, crop.sy, crop.sw, crop.sh, phase);
                     const hitS1Bd = tryDecode(cd.data, crop.sw, crop.sh,
                         (x, y) => ({ x: x + crop.sx, y: y + crop.sy }),
-                        'stage1-bd-other', 0, phase, 'crop');
+                        `stage1-bd-other#${ci + 1}`, 0, phase, 'crop');
                     if (hitS1Bd) return hitS1Bd;
                 }
             }
@@ -2805,7 +2835,7 @@
                         const hitB = tryDecode(cd.data, sw, sh,
                             (x, y) => ({ x: x + sx, y: y + sy }), 'bd-crop', 0, '共通F1 BarcodeDetectorクロップ', 'crop');
                         if (hitB) {
-                            if (target === 'Q1') saveStage1BdQ2Candidate(merged, hitB.points, hitB.versionNumber);
+                            if (target === 'Q1') saveStage1BdQ2Candidate(merged, hitB.points, hitB.versionNumber, box);
                             return hitB;
                         }
                     }
