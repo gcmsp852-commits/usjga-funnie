@@ -352,18 +352,61 @@ function buildBitMatrixFromBinary(data, width, height, returnInverted) {
     }
     return { binarized: binarized, inverted: inverted };
 }
+function pushDebugProbe(options, reason, extra) {
+    if (!options || !options.debugProbe || !options.probeCollector) {
+        return;
+    }
+    var probe = {
+        reason: reason,
+        stage: extra && extra.stage ? extra.stage : reason,
+        transposed: !!(options && options._probeTransposed),
+        inverted: !!(options && options._probeInverted),
+        sysEncDecode: !!(options && options.sysEncDecode),
+        appEnc: !!(options && options.appEncMask),
+        captureAppEncDataBytes: !!(options && options.captureAppEncDataBytes),
+        preBinarized: !!(options && options.preBinarized),
+        locationIndex: options && options._probeLocationIndex !== undefined ? options._probeLocationIndex : null,
+        dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null
+    };
+    if (extra) {
+        for (var k in extra) {
+            if (Object.prototype.hasOwnProperty.call(extra, k)) {
+                probe[k] = extra[k];
+            }
+        }
+    }
+    options.probeCollector.push(probe);
+}
 function scan(matrix, options) {
     var locations = locator_1.locate(matrix, options);
     // ★ singleLocate では候補を絞る（ただし精度確保のため2つまで許可）
     if (locations && options && options.singleLocate && !options.multi && locations.length > 2) {
         locations = locations.slice(0, 2);
     }
-    if (!locations)
+    if (!locations) {
+        pushDebugProbe(options, "no_locator", {
+            stage: "locator",
+            matrixWidth: matrix ? matrix.width : null,
+            matrixHeight: matrix ? matrix.height : null
+        });
         return null;
+    }
     var results = []; // ★ 追加：結果を格納する配列
     for (var _i = 0, locations_1 = locations; _i < locations_1.length; _i++) {
         var location_1 = locations_1[_i];
-        var extracted = extractor_1.extract(matrix, location_1);
+        options._probeLocationIndex = _i;
+        options._probeLocationDimension = location_1.dimension;
+        var extracted = void 0;
+        try {
+            extracted = extractor_1.extract(matrix, location_1);
+        }
+        catch (e) {
+            pushDebugProbe(options, "extract_failed", {
+                stage: "extract",
+                message: e && e.message ? e.message : String(e)
+            });
+            continue;
+        }
         var decoded = decoder_1.decode(extracted.matrix, options);
         if (decoded) {
             var res = void 0;
@@ -455,16 +498,20 @@ function jsQR(data, width, height, providedOptions) {
         captureAppEncDataBytes: providedOptions.captureAppEncDataBytes,
         sysEncDecode: providedOptions.sysEncDecode,
         preBinarized: providedOptions.preBinarized,
-        singleLocate: providedOptions.singleLocate
+        singleLocate: providedOptions.singleLocate,
+        debugProbe: providedOptions.debugProbe,
+        probeCollector: providedOptions.probeCollector
     };
     var shouldInvert = options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst";
     var tryInvertedFirst = options.inversionAttempts === "onlyInvert" || options.inversionAttempts === "invertFirst";
     var _a = options.preBinarized ? buildBitMatrixFromBinary(data, width, height, shouldInvert) : binarizer_1.binarize(data, width, height, shouldInvert), binarized = _a.binarized, inverted = _a.inverted;
+    options._probeInverted = !!tryInvertedFirst;
     var result = scan(tryInvertedFirst ? inverted : binarized, options);
     // ★ multiモード時の両面スキャン統合ロジック
     if (options.multi) {
         var allResults = result ? result : [];
         if (options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst") {
+            options._probeInverted = !tryInvertedFirst;
             var result2 = scan(tryInvertedFirst ? binarized : inverted, options);
             if (result2) {
                 allResults = allResults.concat(result2);
@@ -473,6 +520,7 @@ function jsQR(data, width, height, providedOptions) {
         return allResults.length > 0 ? allResults : null;
     }
     if (!result && (options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst")) {
+        options._probeInverted = !tryInvertedFirst;
         result = scan(tryInvertedFirst ? binarized : inverted, options);
     }
     return result;
@@ -632,6 +680,31 @@ function numBitsDiffering(x, y) {
 }
 function pushBit(bit, byte) {
     return (byte << 1) | bit;
+}
+function pushDebugProbe(options, reason, extra) {
+    if (!options || !options.debugProbe || !options.probeCollector) {
+        return;
+    }
+    var probe = {
+        reason: reason,
+        stage: extra && extra.stage ? extra.stage : reason,
+        transposed: !!(options && options._probeTransposed),
+        inverted: !!(options && options._probeInverted),
+        sysEncDecode: !!(options && options.sysEncDecode),
+        appEnc: !!(options && options.appEncMask),
+        captureAppEncDataBytes: !!(options && options.captureAppEncDataBytes),
+        preBinarized: !!(options && options.preBinarized),
+        locationIndex: options && options._probeLocationIndex !== undefined ? options._probeLocationIndex : null,
+        dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null
+    };
+    if (extra) {
+        for (var k in extra) {
+            if (Object.prototype.hasOwnProperty.call(extra, k)) {
+                probe[k] = extra[k];
+            }
+        }
+    }
+    options.probeCollector.push(probe);
 }
 // tslint:enable:no-bitwise
 var FORMAT_INFO_TABLE = [
@@ -873,6 +946,11 @@ function getDataBlocks(codewords, version, ecLevel) {
 function decodeMatrix(matrix, options) {
     var version = readVersion(matrix);
     if (!version) {
+        pushDebugProbe(options, "no_version", {
+            stage: "read_version",
+            matrixWidth: matrix ? matrix.width : null,
+            matrixHeight: matrix ? matrix.height : null
+        });
         return null;
     }
     var formatInfo;
@@ -882,6 +960,10 @@ function decodeMatrix(matrix, options) {
         formatInfo = readFormatInformation(matrix);
     }
     if (!formatInfo) {
+        pushDebugProbe(options, "no_format", {
+            stage: "read_format",
+            versionNumber: version.versionNumber
+        });
         return null;
     }
     var codewords = readCodewords(matrix, version, formatInfo);
@@ -908,6 +990,14 @@ function decodeMatrix(matrix, options) {
     var originalCodewords = codewords.slice(0, totalCodewords);
     var dataBlocks = getDataBlocks(codewords, version, ecLevel);
     if (!dataBlocks) {
+        pushDebugProbe(options, "codewords_short", {
+            stage: "get_data_blocks",
+            versionNumber: version.versionNumber,
+            ecLevel: ecLevel,
+            dataMask: formatInfo.dataMask,
+            codewordsLen: codewords ? codewords.length : null,
+            totalCodewords: totalCodewords
+        });
         return null;
     }
     var totalBytes = dataBlocks.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
@@ -918,6 +1008,16 @@ function decodeMatrix(matrix, options) {
         var dataBlock = dataBlocks_3[_i];
         var correctedBytes = reedsolomon_1.decode(dataBlock.codewords, dataBlock.codewords.length - dataBlock.numDataCodewords);
         if (!correctedBytes) {
+            pushDebugProbe(options, "rs_failed", {
+                stage: "reed_solomon",
+                versionNumber: version.versionNumber,
+                ecLevel: ecLevel,
+                dataMask: formatInfo.dataMask,
+                blockIndex: _i,
+                blockCodewords: dataBlock.codewords.length,
+                dataCodewords: dataBlock.numDataCodewords,
+                eccCodewords: dataBlock.codewords.length - dataBlock.numDataCodewords
+            });
             if (options && options.extractRawForFailed) {
                 return { isRaw: true, codewords: originalCodewords, version: version, formatInfo: formatInfo };
             }
@@ -979,6 +1079,13 @@ function decodeMatrix(matrix, options) {
         return res;
     }
     catch (_a) {
+        pushDebugProbe(options, "data_decode_failed", {
+            stage: "decode_data",
+            versionNumber: version.versionNumber,
+            ecLevel: ecLevel,
+            dataMask: formatInfo.dataMask,
+            dataBytesLen: resultBytes ? resultBytes.length : null
+        });
         if (options && (options.extractRawForFailed || options.captureAppEncDataBytes)) {
             return {
                 isRaw: true,
@@ -1006,6 +1113,7 @@ function decode(matrix, options) {
     if (matrix == null) {
         return null;
     }
+    if (options) options._probeTransposed = false;
     var result = decodeMatrix(matrix, options);
     if (result) {
         return result;
@@ -1018,6 +1126,7 @@ function decode(matrix, options) {
             }
         }
     }
+    if (options) options._probeTransposed = true;
     return decodeMatrix(matrix, options);
 }
 exports.decode = decode;
