@@ -366,7 +366,8 @@ function pushDebugProbe(options, reason, extra) {
         captureAppEncDataBytes: !!(options && options.captureAppEncDataBytes),
         preBinarized: !!(options && options.preBinarized),
         locationIndex: options && options._probeLocationIndex !== undefined ? options._probeLocationIndex : null,
-        dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null
+        dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null,
+        moduleSize: options && options._probeLocationModuleSize !== undefined ? options._probeLocationModuleSize : null
     };
     if (extra) {
         for (var k in extra) {
@@ -396,6 +397,7 @@ function scan(matrix, options) {
         var location_1 = locations_1[_i];
         options._probeLocationIndex = _i;
         options._probeLocationDimension = location_1.dimension;
+        options._probeLocationModuleSize = location_1.moduleSize;
         var extracted = void 0;
         try {
             extracted = extractor_1.extract(matrix, location_1);
@@ -695,7 +697,8 @@ function pushDebugProbe(options, reason, extra) {
         captureAppEncDataBytes: !!(options && options.captureAppEncDataBytes),
         preBinarized: !!(options && options.preBinarized),
         locationIndex: options && options._probeLocationIndex !== undefined ? options._probeLocationIndex : null,
-        dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null
+        dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null,
+        moduleSize: options && options._probeLocationModuleSize !== undefined ? options._probeLocationModuleSize : null
     };
     if (extra) {
         for (var k in extra) {
@@ -849,7 +852,59 @@ function readVersion(matrix) {
         return bestVersion;
     }
 }
-function readFormatInformation(matrix) {
+function inspectVersionInformation(matrix) {
+    var dimension = matrix.height;
+    var provisionalVersion = Math.floor((dimension - 17) / 4);
+    var info = {
+        dimension: dimension,
+        provisionalVersion: provisionalVersion,
+        topRightVersionBits: null,
+        bottomLeftVersionBits: null,
+        versionBestDiff: null,
+        versionBestNumber: null
+    };
+    if (provisionalVersion <= 6) {
+        info.versionBestNumber = provisionalVersion;
+        info.versionBestDiff = 0;
+        return info;
+    }
+    var topRightVersionBits = 0;
+    for (var y = 5; y >= 0; y--) {
+        for (var x = dimension - 9; x >= dimension - 11; x--) {
+            topRightVersionBits = pushBit(matrix.get(x, y), topRightVersionBits);
+        }
+    }
+    var bottomLeftVersionBits = 0;
+    for (var x = 5; x >= 0; x--) {
+        for (var y = dimension - 9; y >= dimension - 11; y--) {
+            bottomLeftVersionBits = pushBit(matrix.get(x, y), bottomLeftVersionBits);
+        }
+    }
+    var bestDifference = Infinity;
+    var bestVersion = null;
+    for (var _i = 0, VERSIONS_2 = version_1.VERSIONS; _i < VERSIONS_2.length; _i++) {
+        var version = VERSIONS_2[_i];
+        if (version.infoBits === null) {
+            continue;
+        }
+        var difference = numBitsDiffering(topRightVersionBits, version.infoBits);
+        if (difference < bestDifference) {
+            bestVersion = version;
+            bestDifference = difference;
+        }
+        difference = numBitsDiffering(bottomLeftVersionBits, version.infoBits);
+        if (difference < bestDifference) {
+            bestVersion = version;
+            bestDifference = difference;
+        }
+    }
+    info.topRightVersionBits = topRightVersionBits;
+    info.bottomLeftVersionBits = bottomLeftVersionBits;
+    info.versionBestDiff = bestDifference === Infinity ? null : bestDifference;
+    info.versionBestNumber = bestVersion ? bestVersion.versionNumber : null;
+    return info;
+}
+function inspectFormatInformation(matrix) {
     var topLeftFormatInfoBits = 0;
     for (var x = 0; x <= 8; x++) {
         if (x !== 6) {
@@ -871,26 +926,45 @@ function readFormatInformation(matrix) {
     }
     var bestDifference = Infinity;
     var bestFormatInfo = null;
+    var bestBits = null;
+    var exact = false;
     for (var _i = 0, FORMAT_INFO_TABLE_1 = FORMAT_INFO_TABLE; _i < FORMAT_INFO_TABLE_1.length; _i++) {
         var _a = FORMAT_INFO_TABLE_1[_i], bits = _a.bits, formatInfo = _a.formatInfo;
         if (bits === topLeftFormatInfoBits || bits === topRightBottomRightFormatInfoBits) {
-            return formatInfo;
+            bestFormatInfo = formatInfo;
+            bestBits = bits;
+            bestDifference = 0;
+            exact = true;
+            break;
         }
         var difference = numBitsDiffering(topLeftFormatInfoBits, bits);
         if (difference < bestDifference) {
             bestFormatInfo = formatInfo;
             bestDifference = difference;
+            bestBits = bits;
         }
         if (topLeftFormatInfoBits !== topRightBottomRightFormatInfoBits) {
             difference = numBitsDiffering(topRightBottomRightFormatInfoBits, bits);
             if (difference < bestDifference) {
                 bestFormatInfo = formatInfo;
                 bestDifference = difference;
+                bestBits = bits;
             }
         }
     }
-    if (bestDifference <= 3) {
-        return bestFormatInfo;
+    return {
+        topLeftFormatInfoBits: topLeftFormatInfoBits,
+        topRightBottomRightFormatInfoBits: topRightBottomRightFormatInfoBits,
+        formatBestDiff: bestDifference === Infinity ? null : bestDifference,
+        formatBestInfo: bestFormatInfo,
+        formatBestBits: bestBits,
+        exact: exact
+    };
+}
+function readFormatInformation(matrix) {
+    var inspected = inspectFormatInformation(matrix);
+    if (inspected.exact || inspected.formatBestDiff <= 3) {
+        return inspected.formatBestInfo;
     }
     return null;
 }
@@ -946,10 +1020,16 @@ function getDataBlocks(codewords, version, ecLevel) {
 function decodeMatrix(matrix, options) {
     var version = readVersion(matrix);
     if (!version) {
+        var versionProbe = inspectVersionInformation(matrix);
         pushDebugProbe(options, "no_version", {
             stage: "read_version",
             matrixWidth: matrix ? matrix.width : null,
-            matrixHeight: matrix ? matrix.height : null
+            matrixHeight: matrix ? matrix.height : null,
+            provisionalVersion: versionProbe.provisionalVersion,
+            versionBestDiff: versionProbe.versionBestDiff,
+            versionBestNumber: versionProbe.versionBestNumber,
+            topRightVersionBits: versionProbe.topRightVersionBits,
+            bottomLeftVersionBits: versionProbe.bottomLeftVersionBits
         });
         return null;
     }
@@ -960,9 +1040,16 @@ function decodeMatrix(matrix, options) {
         formatInfo = readFormatInformation(matrix);
     }
     if (!formatInfo) {
+        var formatProbe = inspectFormatInformation(matrix);
         pushDebugProbe(options, "no_format", {
             stage: "read_format",
-            versionNumber: version.versionNumber
+            versionNumber: version.versionNumber,
+            formatBestDiff: formatProbe.formatBestDiff,
+            formatBestEc: formatProbe.formatBestInfo ? formatProbe.formatBestInfo.errorCorrectionLevel : null,
+            formatBestMask: formatProbe.formatBestInfo ? formatProbe.formatBestInfo.dataMask : null,
+            topLeftFormatBits: formatProbe.topLeftFormatInfoBits,
+            topRightBottomRightFormatBits: formatProbe.topRightBottomRightFormatInfoBits,
+            formatBestBits: formatProbe.formatBestBits
         });
         return null;
     }
@@ -1008,6 +1095,7 @@ function decodeMatrix(matrix, options) {
         var dataBlock = dataBlocks_3[_i];
         var correctedBytes = reedsolomon_1.decode(dataBlock.codewords, dataBlock.codewords.length - dataBlock.numDataCodewords);
         if (!correctedBytes) {
+            var rsDiag = reedsolomon_1.diagnose ? reedsolomon_1.diagnose(dataBlock.codewords, dataBlock.codewords.length - dataBlock.numDataCodewords) : null;
             pushDebugProbe(options, "rs_failed", {
                 stage: "reed_solomon",
                 versionNumber: version.versionNumber,
@@ -1016,7 +1104,15 @@ function decodeMatrix(matrix, options) {
                 blockIndex: _i,
                 blockCodewords: dataBlock.codewords.length,
                 dataCodewords: dataBlock.numDataCodewords,
-                eccCodewords: dataBlock.codewords.length - dataBlock.numDataCodewords
+                eccCodewords: dataBlock.codewords.length - dataBlock.numDataCodewords,
+                totalCodewords: totalCodewords,
+                totalDataCodewords: totalBytes,
+                blockCount: dataBlocks.length,
+                rsFailureStage: rsDiag ? rsDiag.failureStage : null,
+                syndromeWeight: rsDiag ? rsDiag.syndromeWeight : null,
+                correctableSymbols: rsDiag ? rsDiag.correctableSymbols : Math.floor((dataBlock.codewords.length - dataBlock.numDataCodewords) / 2),
+                errorLocatorDegree: rsDiag ? rsDiag.errorLocatorDegree : null,
+                errorLocationsCount: rsDiag ? rsDiag.errorLocationsCount : null
             });
             if (options && options.extractRawForFailed) {
                 return { isRaw: true, codewords: originalCodewords, version: version, formatInfo: formatInfo };
@@ -8692,6 +8788,66 @@ function decode(bytes, twoS) {
     return outputBytes;
 }
 exports.decode = decode;
+function diagnose(bytes, twoS) {
+    var outputBytes = new Uint8ClampedArray(bytes.length);
+    outputBytes.set(bytes);
+    var field = new GenericGF_1.default(0x011D, 256, 0);
+    var poly = new GenericGFPoly_1.default(field, outputBytes);
+    var syndromeCoefficients = new Uint8ClampedArray(twoS);
+    var syndromeWeight = 0;
+    var error = false;
+    for (var s = 0; s < twoS; s++) {
+        var evaluation = poly.evaluateAt(field.exp(s + field.generatorBase));
+        syndromeCoefficients[syndromeCoefficients.length - 1 - s] = evaluation;
+        if (evaluation !== 0) {
+            syndromeWeight++;
+            error = true;
+        }
+    }
+    var base = {
+        hasSyndromeError: error,
+        syndromeWeight: syndromeWeight,
+        correctableSymbols: Math.floor(twoS / 2),
+        failureStage: error ? null : "none",
+        errorLocationsCount: 0
+    };
+    if (!error) {
+        return base;
+    }
+    var syndrome = new GenericGFPoly_1.default(field, syndromeCoefficients);
+    var sigmaOmega = runEuclideanAlgorithm(field, field.buildMonomial(twoS, 1), syndrome, twoS);
+    if (sigmaOmega === null) {
+        base.failureStage = "euclidean_failed";
+        return base;
+    }
+    base.errorLocatorDegree = sigmaOmega[0].degree();
+    var errorLocations = findErrorLocations(field, sigmaOmega[0]);
+    if (errorLocations == null) {
+        base.failureStage = "error_locations_failed";
+        return base;
+    }
+    base.errorLocationsCount = errorLocations.length;
+    try {
+        var errorMagnitudes = findErrorMagnitudes(field, sigmaOmega[1], errorLocations);
+        base.errorMagnitudesCount = errorMagnitudes ? errorMagnitudes.length : null;
+        for (var i = 0; i < errorLocations.length; i++) {
+            var position = outputBytes.length - 1 - field.log(errorLocations[i]);
+            if (position < 0) {
+                base.failureStage = "bad_error_position";
+                base.badErrorPosition = position;
+                return base;
+            }
+        }
+    }
+    catch (e) {
+        base.failureStage = "error_magnitudes_failed";
+        base.message = e && e.message ? e.message : String(e);
+        return base;
+    }
+    base.failureStage = errorLocations.length > Math.floor(twoS / 2) ? "too_many_errors" : "unknown_rs_failure";
+    return base;
+}
+exports.diagnose = diagnose;
 
 
 /***/ }),
@@ -10446,6 +10602,7 @@ function locate(matrix, options) {
                 alignmentPattern: { x: alignment.alignmentPattern.x, y: alignment.alignmentPattern.y },
                 bottomLeft: { x: bottomLeft.x, y: bottomLeft.y },
                 dimension: alignment.dimension,
+                moduleSize: alignment.moduleSize,
                 topLeft: { x: topLeft.x, y: topLeft.y },
                 topRight: { x: topRight.x, y: topRight.y },
             });
@@ -10462,6 +10619,7 @@ function locate(matrix, options) {
                 alignmentPattern: { x: centeredAlignment.alignmentPattern.x, y: centeredAlignment.alignmentPattern.y },
                 bottomLeft: { x: midBottomLeft.x, y: midBottomLeft.y },
                 dimension: centeredAlignment.dimension,
+                moduleSize: centeredAlignment.moduleSize,
                 topLeft: { x: midTopLeft.x, y: midTopLeft.y },
                 topRight: { x: midTopRight.x, y: midTopRight.y },
             });
@@ -10513,7 +10671,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         .filter(function (v) { return !!v; })
         .sort(function (a, b) { return a.score - b.score; });
     var alignmentPattern = modulesBetweenFinderPatterns >= 15 && alignmentPatterns.length ? alignmentPatterns[0] : expectedAlignmentPattern;
-    return { alignmentPattern: alignmentPattern, dimension: dimension };
+    return { alignmentPattern: alignmentPattern, dimension: dimension, moduleSize: moduleSize };
 }
 
 

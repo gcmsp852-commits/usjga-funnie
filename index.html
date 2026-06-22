@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader27</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1392,6 +1392,23 @@
                         mask: probe.dataMask !== undefined ? probe.dataMask : null,
                         locationIndex: probe.locationIndex !== undefined ? probe.locationIndex : null,
                         dimension: probe.dimension || null,
+                        moduleSize: probe.moduleSize !== undefined && probe.moduleSize !== null ? probe.moduleSize : null,
+                        provisionalVersion: probe.provisionalVersion !== undefined ? probe.provisionalVersion : null,
+                        versionBestDiff: probe.versionBestDiff !== undefined ? probe.versionBestDiff : null,
+                        versionBestNumber: probe.versionBestNumber !== undefined ? probe.versionBestNumber : null,
+                        formatBestDiff: probe.formatBestDiff !== undefined ? probe.formatBestDiff : null,
+                        formatBestEc: probe.formatBestEc !== undefined ? probe.formatBestEc : null,
+                        formatBestMask: probe.formatBestMask !== undefined ? probe.formatBestMask : null,
+                        rsFailureStage: probe.rsFailureStage || '',
+                        syndromeWeight: probe.syndromeWeight !== undefined ? probe.syndromeWeight : null,
+                        correctableSymbols: probe.correctableSymbols !== undefined ? probe.correctableSymbols : null,
+                        errorLocatorDegree: probe.errorLocatorDegree !== undefined ? probe.errorLocatorDegree : null,
+                        errorLocationsCount: probe.errorLocationsCount !== undefined ? probe.errorLocationsCount : null,
+                        blockIndex: probe.blockIndex !== undefined ? probe.blockIndex : null,
+                        blockCodewords: probe.blockCodewords !== undefined ? probe.blockCodewords : null,
+                        dataCodewords: probe.dataCodewords !== undefined ? probe.dataCodewords : null,
+                        eccCodewords: probe.eccCodewords !== undefined ? probe.eccCodewords : null,
+                        blockCount: probe.blockCount !== undefined ? probe.blockCount : null,
                         bin: meta.bin || '',
                         scale: meta.scale || '',
                         rot: meta.rot || '',
@@ -1779,8 +1796,25 @@
                                 const details = [
                                     s.stage ? `stage=${s.stage}` : '',
                                     s.version ? `v${s.version}` : '',
+                                    s.provisionalVersion !== null ? `pv${s.provisionalVersion}` : '',
+                                    s.versionBestDiff !== null ? `vDiff=${s.versionBestDiff}` : '',
+                                    s.versionBestNumber !== null ? `vBest=${s.versionBestNumber}` : '',
                                     s.mask !== null ? `mask=${s.mask}` : '',
+                                    s.formatBestDiff !== null ? `fmtDiff=${s.formatBestDiff}` : '',
+                                    s.formatBestEc !== null ? `fmtEC=${s.formatBestEc}` : '',
+                                    s.formatBestMask !== null ? `fmtMask=${s.formatBestMask}` : '',
                                     s.dimension ? `dim=${s.dimension}` : '',
+                                    s.moduleSize !== null ? `modPx=${Number(s.moduleSize).toFixed(2)}` : '',
+                                    s.rsFailureStage ? `rs=${s.rsFailureStage}` : '',
+                                    s.syndromeWeight !== null ? `syn=${s.syndromeWeight}` : '',
+                                    s.correctableSymbols !== null ? `cap=${s.correctableSymbols}` : '',
+                                    s.errorLocationsCount !== null ? `errLoc=${s.errorLocationsCount}` : '',
+                                    s.errorLocatorDegree !== null ? `errDeg=${s.errorLocatorDegree}` : '',
+                                    s.blockIndex !== null ? `blk=${s.blockIndex}` : '',
+                                    s.blockCodewords !== null ? `cw=${s.blockCodewords}` : '',
+                                    s.dataCodewords !== null ? `data=${s.dataCodewords}` : '',
+                                    s.eccCodewords !== null ? `ecc=${s.eccCodewords}` : '',
+                                    s.blockCount !== null ? `blocks=${s.blockCount}` : '',
                                     s.scale ? `scale=${s.scale}` : '',
                                     s.bin ? `bin=${s.bin}` : '',
                                     s.rot !== '' ? `rot=${s.rot}` : '',
