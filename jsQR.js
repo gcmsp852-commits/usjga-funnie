@@ -367,7 +367,9 @@ function pushDebugProbe(options, reason, extra) {
         preBinarized: !!(options && options.preBinarized),
         locationIndex: options && options._probeLocationIndex !== undefined ? options._probeLocationIndex : null,
         dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null,
-        moduleSize: options && options._probeLocationModuleSize !== undefined ? options._probeLocationModuleSize : null
+        moduleSize: options && options._probeLocationModuleSize !== undefined ? options._probeLocationModuleSize : null,
+        expectedDimension: options && options.expectedDimension !== undefined ? options.expectedDimension : null,
+        expectedVersionNumber: options && options.expectedVersionNumber !== undefined ? options.expectedVersionNumber : null
     };
     if (extra) {
         for (var k in extra) {
@@ -501,6 +503,9 @@ function jsQR(data, width, height, providedOptions) {
         sysEncDecode: providedOptions.sysEncDecode,
         preBinarized: providedOptions.preBinarized,
         singleLocate: providedOptions.singleLocate,
+        expectedVersionNumber: providedOptions.expectedVersionNumber,
+        expectedDimension: providedOptions.expectedDimension,
+        expectedDimensionTolerance: providedOptions.expectedDimensionTolerance,
         debugProbe: providedOptions.debugProbe,
         probeCollector: providedOptions.probeCollector
     };
@@ -698,7 +703,9 @@ function pushDebugProbe(options, reason, extra) {
         preBinarized: !!(options && options.preBinarized),
         locationIndex: options && options._probeLocationIndex !== undefined ? options._probeLocationIndex : null,
         dimension: options && options._probeLocationDimension !== undefined ? options._probeLocationDimension : null,
-        moduleSize: options && options._probeLocationModuleSize !== undefined ? options._probeLocationModuleSize : null
+        moduleSize: options && options._probeLocationModuleSize !== undefined ? options._probeLocationModuleSize : null,
+        expectedDimension: options && options.expectedDimension !== undefined ? options.expectedDimension : null,
+        expectedVersionNumber: options && options.expectedVersionNumber !== undefined ? options.expectedVersionNumber : null
     };
     if (extra) {
         for (var k in extra) {
@@ -10596,7 +10603,7 @@ function locate(matrix, options) {
     for (var _i = 0, groupsToProcess_1 = groupsToProcess; _i < groupsToProcess_1.length; _i++) {
         var group = groupsToProcess_1[_i];
         var _b = reorderFinderPatterns(group.points[0], group.points[1], group.points[2]), topRight = _b.topRight, topLeft = _b.topLeft, bottomLeft = _b.bottomLeft;
-        var alignment = findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, bottomLeft);
+        var alignment = findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, bottomLeft, options);
         if (alignment) {
             result.push({
                 alignmentPattern: { x: alignment.alignmentPattern.x, y: alignment.alignmentPattern.y },
@@ -10613,7 +10620,7 @@ function locate(matrix, options) {
         var midTopRight = recenterLocation(matrix, topRight);
         var midTopLeft = recenterLocation(matrix, topLeft);
         var midBottomLeft = recenterLocation(matrix, bottomLeft);
-        var centeredAlignment = findAlignmentPattern(matrix, alignmentPatternQuads, midTopRight, midTopLeft, midBottomLeft);
+        var centeredAlignment = findAlignmentPattern(matrix, alignmentPatternQuads, midTopRight, midTopLeft, midBottomLeft, options);
         if (centeredAlignment) {
             result.push({
                 alignmentPattern: { x: centeredAlignment.alignmentPattern.x, y: centeredAlignment.alignmentPattern.y },
@@ -10633,7 +10640,7 @@ function locate(matrix, options) {
 }
 exports.locate = locate;
 // ※これより下の findAlignmentPattern 関数はそのまま残してください
-function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, bottomLeft) {
+function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, bottomLeft, options) {
     var _a;
     var dimension;
     var moduleSize;
@@ -10642,6 +10649,19 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
     }
     catch (e) {
         return null;
+    }
+    if (dimension < 21 || ((dimension - 17) % 4) !== 0) {
+        return null;
+    }
+    var expectedDimension = options && options.expectedDimension;
+    if (!expectedDimension && options && options.expectedVersionNumber) {
+        expectedDimension = 17 + 4 * options.expectedVersionNumber;
+    }
+    if (expectedDimension) {
+        var expectedTolerance = options && options.expectedDimensionTolerance !== undefined ? options.expectedDimensionTolerance : 4;
+        if (Math.abs(dimension - expectedDimension) > expectedTolerance) {
+            return null;
+        }
     }
     var bottomRightFinderPattern = { x: topRight.x - topLeft.x + bottomLeft.x, y: topRight.y - topLeft.y + bottomLeft.y };
     var modulesBetweenFinderPatterns = ((distance(topLeft, bottomLeft) + distance(topLeft, topRight)) / 2 / moduleSize);

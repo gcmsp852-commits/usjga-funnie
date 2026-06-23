@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader83</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1396,6 +1396,8 @@
                         provisionalVersion: probe.provisionalVersion !== undefined ? probe.provisionalVersion : null,
                         versionBestDiff: probe.versionBestDiff !== undefined ? probe.versionBestDiff : null,
                         versionBestNumber: probe.versionBestNumber !== undefined ? probe.versionBestNumber : null,
+                        expectedVersionNumber: probe.expectedVersionNumber !== undefined ? probe.expectedVersionNumber : null,
+                        expectedDimension: probe.expectedDimension !== undefined ? probe.expectedDimension : null,
                         formatBestDiff: probe.formatBestDiff !== undefined ? probe.formatBestDiff : null,
                         formatBestEc: probe.formatBestEc !== undefined ? probe.formatBestEc : null,
                         formatBestMask: probe.formatBestMask !== undefined ? probe.formatBestMask : null,
@@ -1799,6 +1801,8 @@
                                     s.provisionalVersion !== null ? `pv${s.provisionalVersion}` : '',
                                     s.versionBestDiff !== null ? `vDiff=${s.versionBestDiff}` : '',
                                     s.versionBestNumber !== null ? `vBest=${s.versionBestNumber}` : '',
+                                    s.expectedVersionNumber !== null ? `expV=${s.expectedVersionNumber}` : '',
+                                    s.expectedDimension !== null ? `expDim=${s.expectedDimension}` : '',
                                     s.mask !== null ? `mask=${s.mask}` : '',
                                     s.formatBestDiff !== null ? `fmtDiff=${s.formatBestDiff}` : '',
                                     s.formatBestEc !== null ? `fmtEC=${s.formatBestEc}` : '',
@@ -2814,6 +2818,11 @@
                         if (dopt.sysEncDecode) opts.sysEncDecode = dopt.sysEncDecode;
                         if (dopt.appEncMask) opts.appEncMask = dopt.appEncMask;
                         if (dopt.captureAppEncDataBytes) opts.captureAppEncDataBytes = true;
+                        if (target === 'Q2' && profile.firstQrVersionNumber) {
+                            opts.expectedVersionNumber = profile.firstQrVersionNumber;
+                            opts.expectedDimension = 17 + 4 * profile.firstQrVersionNumber;
+                            opts.expectedDimensionTolerance = 4; // Q1 version の±1段階までを許容
+                        }
                         opts.debugProbe = true;
                         opts.probeCollector = [];
                         recordJsQrInput(phaseLabel, imageType);
@@ -3670,14 +3679,20 @@
                         appEncMask: Array.from(appMask),
                         sysEncDecode: true,
                         multi: true,
-                        preBinarized: true
+                        preBinarized: true,
+                        expectedVersionNumber: firstQR && firstQR.versionNumber,
+                        expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
+                        expectedDimensionTolerance: 4
                     });
                 } else {
                     resList = jsQR(frame.data, frame.width, frame.height, {
                         inversionAttempts: QR_INV_PRIMARY,
                         appEncMask: Array.from(appMask),
                         sysEncDecode: true,
-                        multi: true
+                        multi: true,
+                        expectedVersionNumber: firstQR && firstQR.versionNumber,
+                        expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
+                        expectedDimensionTolerance: 4
                     });
                 }
                 addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tAppFrame, 'jsqr');
