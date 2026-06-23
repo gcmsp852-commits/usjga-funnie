@@ -10554,8 +10554,8 @@ function locate(matrix, options) {
         .sort(function (a, b) { return a.score - b.score; });
     // ★ 改良点：QRツインの密集したマーク群から、正しい3つだけを幾何学的に抽出する
     // ▼▼ src/locator/index.ts の下部を上書き ▼▼
-    // Ver5/Ver6 の小さいツインでも初回候補から落とさないよう候補数を増やす。
-    var maxFinderPatterns = options && options.singleLocate ? 12 : 24;
+    // QRツインの偽Finder Pattern組み合わせを抑えるため、候補数を先に絞る。
+    var maxFinderPatterns = 12;
     var topFinderPatterns = validFinderPatterns.slice(0, maxFinderPatterns);
     var finderPatternGroups = [];
     var len = topFinderPatterns.length;
@@ -10598,7 +10598,7 @@ function locate(matrix, options) {
     }
     var result = [];
     var isSingle = options && options.singleLocate;
-    var maxGroups = isSingle ? 5 : 12;
+    var maxGroups = isSingle ? 5 : 6;
     var groupsToProcess = finderPatternGroups.slice(0, maxGroups);
     for (var _i = 0, groupsToProcess_1 = groupsToProcess; _i < groupsToProcess_1.length; _i++) {
         var group = groupsToProcess_1[_i];
