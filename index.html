@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader55</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2821,7 +2821,7 @@
                         if (target === 'Q2' && profile.firstQrVersionNumber) {
                             opts.expectedVersionNumber = profile.firstQrVersionNumber;
                             opts.expectedDimension = 17 + 4 * profile.firstQrVersionNumber;
-                            opts.expectedDimensionTolerance = 0; // Q1 version と同一dimensionのみ許容
+                            opts.expectedDimensionTolerance = 4; // Q1 version の±1段階までを許容
                         }
                         opts.debugProbe = true;
                         opts.probeCollector = [];
@@ -3682,7 +3682,7 @@
                         preBinarized: true,
                         expectedVersionNumber: firstQR && firstQR.versionNumber,
                         expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
-                        expectedDimensionTolerance: 0
+                        expectedDimensionTolerance: 4
                     });
                 } else {
                     resList = jsQR(frame.data, frame.width, frame.height, {
@@ -3692,7 +3692,7 @@
                         multi: true,
                         expectedVersionNumber: firstQR && firstQR.versionNumber,
                         expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
-                        expectedDimensionTolerance: 0
+                        expectedDimensionTolerance: 4
                     });
                 }
                 addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tAppFrame, 'jsqr');
