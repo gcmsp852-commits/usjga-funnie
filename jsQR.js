@@ -10678,8 +10678,8 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         // ★ ツインQR対策：予想位置からの距離がごくわずか(1モジュール以内)の場合のみ採用。
         // ツインでは別QRのノイズが非常に多いため、少しでも離れたものを採用すると深刻な歪みが発生する。
         // Ver5/Ver6 ではアライメントが小さく、縮小画像や縦持ち時に予想位置がややズレる。
-        // 高バージョンだけ距離許容を広げ、低バージョンで別QRを拾うリスクは抑える。
-        var alignmentTolerance = dimension >= 37 ? 3.5 : 2.5;
+        // 高バージョンだけ距離許容を少し広げ、別QR由来のalignment候補を拾いにくくする。
+        var alignmentTolerance = dimension >= 37 ? 2.5 : 2.0;
         if (d > moduleSize * alignmentTolerance) {
             return;
         }
