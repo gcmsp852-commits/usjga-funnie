@@ -10577,13 +10577,13 @@ function locate(matrix, options) {
                 var diag = distance(topRight, bottomLeft);
                 if (topSide === 0 || leftSide === 0)
                     continue;
-                // ★ 縦と横の長さの比率（スマホを斜めに構えた時の歪みを考慮し、0.4 〜 2.5 と大幅に緩和）
+                // ★ 縦と横の長さの比率。斜め撮影を許容しつつ、偽3点組み合わせを抑える。
                 var ratio = topSide / leftSide;
-                if (ratio < 0.4 || ratio > 2.5)
+                if (ratio < 0.55 || ratio > 1.85)
                     continue;
-                // ★ 直角かどうか（これも斜め撮影を考慮して 0.4 〜 2.5 に緩和）
+                // ★ 直角かどうか。まず中間値まで締める。
                 var angleRatio = (diag * diag) / (topSide * topSide + leftSide * leftSide);
-                if (angleRatio < 0.4 || angleRatio > 2.5)
+                if (angleRatio < 0.55 || angleRatio > 1.85)
                     continue;
                 // 幾何学的な「歪み」のペナルティを強め、偽Finder Patternの優先度を下げる。
                 var geoErr = Math.abs(1 - ratio) + Math.abs(1 - angleRatio);
