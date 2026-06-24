@@ -371,6 +371,27 @@ function pushDebugProbe(options, reason, extra) {
         expectedDimension: options && options.expectedDimension !== undefined ? options.expectedDimension : null,
         expectedVersionNumber: options && options.expectedVersionNumber !== undefined ? options.expectedVersionNumber : null
     };
+    var locationMeta = options && options._probeLocationMeta ? options._probeLocationMeta : null;
+    if (locationMeta) {
+        probe.fpRank = locationMeta.fpRank;
+        probe.fpRecentered = !!locationMeta.fpRecentered;
+        probe.fpTopLeft = locationMeta.fpTopLeft;
+        probe.fpTopRight = locationMeta.fpTopRight;
+        probe.fpBottomLeft = locationMeta.fpBottomLeft;
+        probe.fpScores = locationMeta.fpScores;
+        probe.sizeErr = locationMeta.sizeErr;
+        probe.sideRatio = locationMeta.sideRatio;
+        probe.angleRatio = locationMeta.angleRatio;
+        probe.geoErr = locationMeta.geoErr;
+        probe.groupScore = locationMeta.groupScore;
+        probe.alignmentDistance = locationMeta.alignmentDistance;
+        probe.alignmentTolerance = locationMeta.alignmentTolerance;
+        probe.alignmentExpected = locationMeta.alignmentExpected;
+        probe.alignmentUsed = locationMeta.alignmentUsed;
+    }
+    if (options && options._probeLocationCorners) {
+        probe.locationCorners = options._probeLocationCorners;
+    }
     if (extra) {
         for (var k in extra) {
             if (Object.prototype.hasOwnProperty.call(extra, k)) {
@@ -400,9 +421,17 @@ function scan(matrix, options) {
         options._probeLocationIndex = _i;
         options._probeLocationDimension = location_1.dimension;
         options._probeLocationModuleSize = location_1.moduleSize;
+        options._probeLocationMeta = location_1.probeMeta || null;
+        options._probeLocationCorners = null;
         var extracted = void 0;
         try {
             extracted = extractor_1.extract(matrix, location_1);
+            options._probeLocationCorners = {
+                topLeft: extracted.mappingFunction(0, 0),
+                topRight: extracted.mappingFunction(location_1.dimension, 0),
+                bottomRight: extracted.mappingFunction(location_1.dimension, location_1.dimension),
+                bottomLeft: extracted.mappingFunction(0, location_1.dimension)
+            };
         }
         catch (e) {
             pushDebugProbe(options, "extract_failed", {
@@ -707,6 +736,28 @@ function pushDebugProbe(options, reason, extra) {
         expectedDimension: options && options.expectedDimension !== undefined ? options.expectedDimension : null,
         expectedVersionNumber: options && options.expectedVersionNumber !== undefined ? options.expectedVersionNumber : null
     };
+    var locationMeta = options && options._probeLocationMeta ? options._probeLocationMeta : null;
+    if (locationMeta) {
+        probe.fpRank = locationMeta.fpRank;
+        probe.fpRecentered = !!locationMeta.fpRecentered;
+        probe.fpTopLeft = locationMeta.fpTopLeft;
+        probe.fpTopRight = locationMeta.fpTopRight;
+        probe.fpBottomLeft = locationMeta.fpBottomLeft;
+        probe.fpScores = locationMeta.fpScores;
+        probe.sizeErr = locationMeta.sizeErr;
+        probe.ratio = locationMeta.ratio;
+        probe.sideRatio = locationMeta.sideRatio;
+        probe.angleRatio = locationMeta.angleRatio;
+        probe.geoErr = locationMeta.geoErr;
+        probe.groupScore = locationMeta.groupScore;
+        probe.alignmentDistance = locationMeta.alignmentDistance;
+        probe.alignmentTolerance = locationMeta.alignmentTolerance;
+        probe.alignmentExpected = locationMeta.alignmentExpected;
+        probe.alignmentUsed = locationMeta.alignmentUsed;
+    }
+    if (options && options._probeLocationCorners) {
+        probe.locationCorners = options._probeLocationCorners;
+    }
     if (extra) {
         for (var k in extra) {
             if (Object.prototype.hasOwnProperty.call(extra, k)) {
@@ -10588,7 +10639,16 @@ function locate(matrix, options) {
                 // 幾何学的な「歪み」のペナルティを強め、偽Finder Patternの優先度を下げる。
                 var geoErr = Math.abs(1 - ratio) + Math.abs(1 - angleRatio);
                 var totalScore = p1.score + p2.score + p3.score + geoErr * 30;
-                finderPatternGroups.push({ points: [p1, p2, p3], score: totalScore });
+                finderPatternGroups.push({
+                    points: [p1, p2, p3],
+                    score: totalScore,
+                    fpScores: [p1.score, p2.score, p3.score],
+                    sizeErr: sizeErr,
+                    ratio: ratio,
+                    sideRatio: ratio,
+                    angleRatio: angleRatio,
+                    geoErr: geoErr
+                });
             }
         }
     }
@@ -10600,6 +10660,29 @@ function locate(matrix, options) {
     var isSingle = options && options.singleLocate;
     var maxGroups = isSingle ? 5 : 6;
     var groupsToProcess = finderPatternGroups.slice(0, maxGroups);
+    var pointMeta = function (p) {
+        return p ? { x: p.x, y: p.y, score: p.score, size: p.size } : null;
+    };
+    var makeProbeMeta = function (rank, recentered, tl, tr, bl, group, alignment) {
+        return {
+            fpRank: rank,
+            fpRecentered: !!recentered,
+            fpTopLeft: pointMeta(tl),
+            fpTopRight: pointMeta(tr),
+            fpBottomLeft: pointMeta(bl),
+            fpScores: group.fpScores || null,
+            sizeErr: group.sizeErr,
+            ratio: group.ratio,
+            sideRatio: group.sideRatio,
+            angleRatio: group.angleRatio,
+            geoErr: group.geoErr,
+            groupScore: group.score,
+            alignmentDistance: alignment && alignment.alignmentDistance !== undefined ? alignment.alignmentDistance : null,
+            alignmentTolerance: alignment && alignment.alignmentTolerance !== undefined ? alignment.alignmentTolerance : null,
+            alignmentExpected: alignment ? alignment.alignmentExpected : null,
+            alignmentUsed: alignment ? alignment.alignmentUsed : null
+        };
+    };
     for (var _i = 0, groupsToProcess_1 = groupsToProcess; _i < groupsToProcess_1.length; _i++) {
         var group = groupsToProcess_1[_i];
         var _b = reorderFinderPatterns(group.points[0], group.points[1], group.points[2]), topRight = _b.topRight, topLeft = _b.topLeft, bottomLeft = _b.bottomLeft;
@@ -10612,6 +10695,7 @@ function locate(matrix, options) {
                 moduleSize: alignment.moduleSize,
                 topLeft: { x: topLeft.x, y: topLeft.y },
                 topRight: { x: topRight.x, y: topRight.y },
+                probeMeta: makeProbeMeta(_i, false, topLeft, topRight, bottomLeft, group, alignment),
             });
             // singleLocate でも Ver5/Ver6 では候補差が小さいため、少し余分に試す。
             if (isSingle && result.length >= 3) break;
@@ -10629,6 +10713,7 @@ function locate(matrix, options) {
                 moduleSize: centeredAlignment.moduleSize,
                 topLeft: { x: midTopLeft.x, y: midTopLeft.y },
                 topRight: { x: midTopRight.x, y: midTopRight.y },
+                probeMeta: makeProbeMeta(_i, true, midTopLeft, midTopRight, midBottomLeft, group, centeredAlignment),
             });
             if (isSingle && result.length >= 3) break;
         }
@@ -10667,6 +10752,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
     var modulesBetweenFinderPatterns = ((distance(topLeft, bottomLeft) + distance(topLeft, topRight)) / 2 / moduleSize);
     var correctionToTopLeft = 1 - (3 / modulesBetweenFinderPatterns);
     var expectedAlignmentPattern = { x: topLeft.x + correctionToTopLeft * (bottomRightFinderPattern.x - topLeft.x), y: topLeft.y + correctionToTopLeft * (bottomRightFinderPattern.y - topLeft.y) };
+    var alignmentTolerance = dimension >= 37 ? 2.5 : 2.0;
     var alignmentPatterns = alignmentPatternQuads
         .map(function (q) {
         var x = (q.top.startX + q.top.endX + q.bottom.startX + q.bottom.endX) / 4;
@@ -10679,19 +10765,27 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         // ツインでは別QRのノイズが非常に多いため、少しでも離れたものを採用すると深刻な歪みが発生する。
         // Ver5/Ver6 ではアライメントが小さく、縮小画像や縦持ち時に予想位置がややズレる。
         // 高バージョンだけ距離許容を少し広げ、別QR由来のalignment候補を拾いにくくする。
-        var alignmentTolerance = dimension >= 37 ? 2.5 : 2.0;
         if (d > moduleSize * alignmentTolerance) {
             return;
         }
         var sizeScore = scorePattern({ x: Math.floor(x), y: Math.floor(y) }, [1, 1, 1], matrix);
         // 菱形パターンの場合は sizeScore が Infinity または非常に悪くなるため、距離 d を最優先で評価する。
         var score = (d * 100) + (sizeScore === Infinity ? 50 : sizeScore);
-        return { x: x, y: y, score: score };
+        return { x: x, y: y, score: score, distance: d };
     })
         .filter(function (v) { return !!v; })
         .sort(function (a, b) { return a.score - b.score; });
-    var alignmentPattern = modulesBetweenFinderPatterns >= 15 && alignmentPatterns.length ? alignmentPatterns[0] : expectedAlignmentPattern;
-    return { alignmentPattern: alignmentPattern, dimension: dimension, moduleSize: moduleSize };
+    var alignmentUsed = modulesBetweenFinderPatterns >= 15 && alignmentPatterns.length ? alignmentPatterns[0] : null;
+    var alignmentPattern = alignmentUsed ? alignmentUsed : expectedAlignmentPattern;
+    return {
+        alignmentPattern: alignmentPattern,
+        dimension: dimension,
+        moduleSize: moduleSize,
+        alignmentDistance: alignmentUsed ? alignmentUsed.distance : null,
+        alignmentTolerance: alignmentTolerance,
+        alignmentExpected: { x: expectedAlignmentPattern.x, y: expectedAlignmentPattern.y },
+        alignmentUsed: alignmentUsed ? { x: alignmentUsed.x, y: alignmentUsed.y, score: alignmentUsed.score } : null
+    };
 }
 
 
