@@ -10565,10 +10565,10 @@ function locate(matrix, options) {
                 var p1 = topFinderPatterns[i];
                 var p2 = topFinderPatterns[j];
                 var p3 = topFinderPatterns[k];
-                // ① サイズのチェック（ピンボケを考慮して許容範囲を 0.5 -> 1.0 に緩和）
+                // ① サイズのチェック。偽Finder Pattern混入を抑えるため、まず中間値まで締める。
                 var sizeAvg = (p1.size + p2.size + p3.size) / 3;
                 var sizeErr = (Math.abs(p1.size - sizeAvg) + Math.abs(p2.size - sizeAvg) + Math.abs(p3.size - sizeAvg)) / sizeAvg;
-                if (sizeErr > 1.0)
+                if (sizeErr > 0.7)
                     continue;
                 // ② 配置のチェック
                 var _a = reorderFinderPatterns(p1, p2, p3), topRight = _a.topRight, topLeft = _a.topLeft, bottomLeft = _a.bottomLeft;
