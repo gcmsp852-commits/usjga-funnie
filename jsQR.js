@@ -10585,9 +10585,9 @@ function locate(matrix, options) {
                 var angleRatio = (diag * diag) / (topSide * topSide + leftSide * leftSide);
                 if (angleRatio < 0.4 || angleRatio > 2.5)
                     continue;
-                // 幾何学的な「歪み」のペナルティを軽くし、多少歪んでいてもデコード処理へ回す（50 -> 10）
+                // 幾何学的な「歪み」のペナルティを強め、偽Finder Patternの優先度を下げる。
                 var geoErr = Math.abs(1 - ratio) + Math.abs(1 - angleRatio);
-                var totalScore = p1.score + p2.score + p3.score + geoErr * 10;
+                var totalScore = p1.score + p2.score + p3.score + geoErr * 30;
                 finderPatternGroups.push({ points: [p1, p2, p3], score: totalScore });
             }
         }
