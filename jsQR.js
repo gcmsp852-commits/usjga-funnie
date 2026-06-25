@@ -10820,7 +10820,11 @@ function locate(matrix, options) {
     // ▼▼ src/locator/index.ts の下部を上書き ▼▼
     // QRツインの偽Finder Pattern組み合わせを抑えるため、候補数を先に絞る。
     var maxFinderPatterns = 12;
-    var topFinderPatterns = validFinderPatterns.slice(0, maxFinderPatterns);
+    var bestFinderPatternScore = validFinderPatterns.length ? validFinderPatterns[0].score : Infinity;
+    var finderPatternScoreThreshold = Math.max(120, bestFinderPatternScore * 8);
+    var topFinderPatterns = validFinderPatterns
+        .filter(function (q) { return q.score <= finderPatternScoreThreshold; })
+        .slice(0, maxFinderPatterns);
     var finderPatternGroups = [];
     var len = topFinderPatterns.length;
     for (var i = 0; i < len - 2; i++) {
@@ -10832,7 +10836,7 @@ function locate(matrix, options) {
                 // ① サイズのチェック。偽Finder Pattern混入を抑えるため、まず中間値まで締める。
                 var sizeAvg = (p1.size + p2.size + p3.size) / 3;
                 var sizeErr = (Math.abs(p1.size - sizeAvg) + Math.abs(p2.size - sizeAvg) + Math.abs(p3.size - sizeAvg)) / sizeAvg;
-                if (sizeErr > 0.7)
+                if (sizeErr > 0.45)
                     continue;
                 // ② 配置のチェック
                 var _a = reorderFinderPatterns(p1, p2, p3), topRight = _a.topRight, topLeft = _a.topLeft, bottomLeft = _a.bottomLeft;
@@ -10843,14 +10847,16 @@ function locate(matrix, options) {
                     continue;
                 // ★ 縦と横の長さの比率。斜め撮影を許容しつつ、偽3点組み合わせを抑える。
                 var ratio = topSide / leftSide;
-                if (ratio < 0.55 || ratio > 1.85)
+                if (ratio < 0.70 || ratio > 1.45)
                     continue;
                 // ★ 直角かどうか。まず中間値まで締める。
                 var angleRatio = (diag * diag) / (topSide * topSide + leftSide * leftSide);
-                if (angleRatio < 0.55 || angleRatio > 1.85)
+                if (angleRatio < 0.70 || angleRatio > 1.45)
                     continue;
                 // 幾何学的な「歪み」のペナルティを強め、偽Finder Patternの優先度を下げる。
                 var geoErr = Math.abs(1 - ratio) + Math.abs(1 - angleRatio);
+                if (geoErr > 0.65)
+                    continue;
                 var totalScore = p1.score + p2.score + p3.score + geoErr * 30;
                 finderPatternGroups.push({
                     points: [p1, p2, p3],
