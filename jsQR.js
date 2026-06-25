@@ -475,6 +475,41 @@ function scan(matrix, options) {
         return null;
     }
     var results = []; // ★ 追加：結果を格納する配列
+    var getQrNoFromResult = function (res) {
+        if (!res) {
+            return null;
+        }
+        var mc32 = null;
+        if (res.managementCode32 !== undefined && res.managementCode32 !== null) {
+            mc32 = res.managementCode32 >>> 0;
+        }
+        else if (res.managementCode !== undefined && res.managementCode !== null) {
+            var high = res.managementCode & 0xFFFF;
+            var low = res.managementFlags16 !== undefined && res.managementFlags16 !== null ? res.managementFlags16 & 0xFFFF : 0;
+            mc32 = (((high << 16) | low) >>> 0);
+        }
+        if (mc32 === null) {
+            return null;
+        }
+        return (mc32 >>> 30) & 0x3;
+    };
+    var acceptsDecoded = function (res) {
+        if (!res || res.isRaw) {
+            return false;
+        }
+        if (options && typeof options.acceptDecoded === "function") {
+            try {
+                return !!options.acceptDecoded(res);
+            }
+            catch (e) {
+                return false;
+            }
+        }
+        if (options && options.acceptQrNo !== undefined && options.acceptQrNo !== null) {
+            return getQrNoFromResult(res) === options.acceptQrNo;
+        }
+        return false;
+    };
     for (var _i = 0, locations_1 = locations; _i < locations_1.length; _i++) {
         var location_1 = locations_1[_i];
         options._probeLocationIndex = _i;
@@ -557,6 +592,9 @@ function scan(matrix, options) {
                     appEncDataBytesEncrypted: decoded.appEncDataBytesEncrypted
                 };
             }
+            if (acceptsDecoded(res)) {
+                return options && options.multi ? [res] : res;
+            }
             if (options && options.multi) {
                 results.push(res); // ★ multiモードなら配列に追加して続行
             }
@@ -600,6 +638,8 @@ function jsQR(data, width, height, providedOptions) {
         expectedDimensionTolerance: providedOptions.expectedDimensionTolerance,
         debugProbe: providedOptions.debugProbe,
         probeCollector: providedOptions.probeCollector,
+        acceptQrNo: providedOptions.acceptQrNo,
+        acceptDecoded: providedOptions.acceptDecoded,
         _probeMapPoint: providedOptions._probeMapPoint,
         _probeCropRect: providedOptions._probeCropRect,
         _probeQ1Rect: providedOptions._probeQ1Rect,

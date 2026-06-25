@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader48</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2461,6 +2461,7 @@
                 let v;
                 try { v = mk(); } catch (e) { continue; }
                 const opts = Object.assign({}, baseOpts, { inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre });
+                if (wantQrNo === 0 || wantQrNo === 1) opts.acceptQrNo = wantQrNo;
                 let r = null;
                 try { r = jsQR(v.d, w, h, opts); } catch (e) { continue; }
                 if (r && !Array.isArray(r)) r = [r];
@@ -2472,7 +2473,9 @@
             // 保険：標準二値化＋反転両試行（白地反転印刷などの稀ケース）
             if (!acc.length) {
                 try {
-                    let r = jsQR(rgba, w, h, Object.assign({}, baseOpts, { inversionAttempts: QR_INV_BOTH }));
+                    const bothOpts = Object.assign({}, baseOpts, { inversionAttempts: QR_INV_BOTH });
+                    if (wantQrNo === 0 || wantQrNo === 1) bothOpts.acceptQrNo = wantQrNo;
+                    let r = jsQR(rgba, w, h, bothOpts);
                     if (r && !Array.isArray(r)) r = [r];
                     if (r && r.length) acc = acc.concat(r);
                 } catch (e) { /* ignore */ }
@@ -2906,6 +2909,7 @@
                     for (let di = 0; di < optsList.length; di++) {
                         const dopt = optsList[di] || {};
                         const opts = { multi: true, inversionAttempts: QR_INV_PRIMARY, preBinarized: v.pre };
+                        opts.acceptQrNo = (target === 'Q1') ? 0 : 1;
                         if (dopt.sysEncDecode) opts.sysEncDecode = dopt.sysEncDecode;
                         if (dopt.appEncMask) opts.appEncMask = dopt.appEncMask;
                         if (dopt.captureAppEncDataBytes) opts.captureAppEncDataBytes = true;
