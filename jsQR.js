@@ -599,7 +599,11 @@ function jsQR(data, width, height, providedOptions) {
         expectedDimension: providedOptions.expectedDimension,
         expectedDimensionTolerance: providedOptions.expectedDimensionTolerance,
         debugProbe: providedOptions.debugProbe,
-        probeCollector: providedOptions.probeCollector
+        probeCollector: providedOptions.probeCollector,
+        _probeMapPoint: providedOptions._probeMapPoint,
+        _probeCropRect: providedOptions._probeCropRect,
+        _probeQ1Rect: providedOptions._probeQ1Rect,
+        _probeExpectedQ2Rect: providedOptions._probeExpectedQ2Rect
     };
     var shouldInvert = options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst";
     var tryInvertedFirst = options.inversionAttempts === "onlyInvert" || options.inversionAttempts === "invertFirst";
