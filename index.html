@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader45</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2440,9 +2440,7 @@
         function jsqrMultiBin(rgba, w, h, baseOpts, moduleHint, wantQrNo) {
             // 二値化は遅延生成（native成功時はSauvola/Otsuを作らず高速）
             const makeInputs = [
-                () => ({ d: rgba, pre: false }),
-                () => ({ d: buildSauvolaBinaryFromRGBA(rgba, w, h, moduleHint || 0), pre: true }),
-                () => ({ d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true })
+                () => ({ d: rgba, pre: false })
             ];
             // 目的の qrNo（第1QR=0 / 第2QR=1）が結果に含まれるか
             const wantOk = (list) => {
@@ -2900,9 +2898,7 @@
             // mapPt(x,y): その画像座標を元動画座標へ写す関数。 scaleTag/rotTag: 当たった変種の記録用。
             const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel, imageType = 'full', debugMeta = {}) => {
                 const makeVariants = [
-                    () => ({ name: 'native', d: rgba, pre: false }),
-                    () => ({ name: 'sauvola', d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true }),
-                    () => ({ name: 'otsu', d: buildOtsuBinaryFromRGBA(rgba, w, h), pre: true })
+                    () => ({ name: 'native', d: rgba, pre: false })
                 ];
                 for (const mkVariant of makeVariants) {
                     let v;
@@ -3771,34 +3767,20 @@
             if (!frame || !appMask || !firstQR) return false;
 
             let resList = null;
-            const phaseLabel = useSauvola ? 'appEnc保存フレーム Sauvola jsQR' : 'appEnc保存フレーム native jsQR';
+            const phaseLabel = 'appEnc保存フレーム native jsQR';
             let _tAppFrame = 0;
             try {
                 recordJsQrInput(phaseLabel, 'full');
                 _tAppFrame = nowPerf();
-                if (useSauvola) {
-                    const bin = buildSauvolaBinaryFromRGBA(frame.data, frame.width, frame.height, 0);
-                    resList = jsQR(bin, frame.width, frame.height, {
-                        inversionAttempts: QR_INV_PRIMARY,
-                        appEncMask: Array.from(appMask),
-                        sysEncDecode: true,
-                        multi: true,
-                        preBinarized: true,
-                        expectedVersionNumber: firstQR && firstQR.versionNumber,
-                        expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
-                        expectedDimensionTolerance: 4
-                    });
-                } else {
-                    resList = jsQR(frame.data, frame.width, frame.height, {
-                        inversionAttempts: QR_INV_PRIMARY,
-                        appEncMask: Array.from(appMask),
-                        sysEncDecode: true,
-                        multi: true,
-                        expectedVersionNumber: firstQR && firstQR.versionNumber,
-                        expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
-                        expectedDimensionTolerance: 4
-                    });
-                }
+                resList = jsQR(frame.data, frame.width, frame.height, {
+                    inversionAttempts: QR_INV_PRIMARY,
+                    appEncMask: Array.from(appMask),
+                    sysEncDecode: true,
+                    multi: true,
+                    expectedVersionNumber: firstQR && firstQR.versionNumber,
+                    expectedDimension: firstQR && firstQR.versionNumber ? (17 + 4 * firstQR.versionNumber) : undefined,
+                    expectedDimensionTolerance: 4
+                });
                 addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tAppFrame, 'jsqr');
             } catch (err) {
                 addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tAppFrame, 'jsqr');
@@ -3903,13 +3885,11 @@
             // (1) パスワード入力前に保存しておいたフレームを最優先で試す（最速パス：既定 binarizer）
             if (finishAppEncFromFrame(pendingAppEncFrame, false)) return true;
             // (1b) ★ 同じフレームを Sauvola 二値化で再試行（紙印刷の低コントラスト救済）
-            if (finishAppEncFromFrame(pendingAppEncFrame, true)) return true;
 
             // (2) 直近の生映像フレームをキャプチャして再試行（既定 binarizer）
             const currentFrame = capturePendingAppEncFrame();
             if (finishAppEncFromFrame(currentFrame, false)) return true;
             // (2b) ★ 同じく Sauvola 版で再試行
-            if (finishAppEncFromFrame(currentFrame, true)) return true;
             // (2c) ★ さらに Sauvola 全画面プリロケート（直近フレームの未クロップ版）
             const _q2PasswordProfile = {
                 kind: 'appenc',
@@ -6875,7 +6855,7 @@
                                         }
                                     }
                                 }
-                                if (detectedItems.length === 0 && (sysEncStage3 || digitalSignStage3)) {
+                                if (false && detectedItems.length === 0 && (sysEncStage3 || digitalSignStage3)) {
                                     const _geoBin = buildSauvolaBinaryFromRGBA(_cropData.data, _q2box.sw, _q2box.sh, 0);
                                     recordJsQrInput('フェーズ0.5 幾何Sauvolaクロップ', 'crop');
                                     const _geoSauvolaOpts = {
@@ -7175,6 +7155,7 @@
                             };
 
                             // (a) Sauvola二値化canvas（コントラスト不足対策）
+                            if (false) {
                             const sb = buildSauvolaBinaryFromRGBA(baseRGBA.data, cw, ch, 0);
                             const sbRGBA = new Uint8ClampedArray(cw * ch * 4);
                             for (let i = 0, j = 0; i < sb.length; i++, j += 4) {
@@ -7182,6 +7163,7 @@
                             }
                             await detectOnRGBA(sbRGBA, cw, ch, 'フェーズ1.6 二値化BD',
                                 (bb) => ({ x: bb.x * invS, y: bb.y * invS, w: bb.width * invS, h: bb.height * invS }));
+                            }
 
                             // (b) 90°回転canvas（方向性ノイズ・向き依存対策）
                             if (detectedItems.length === 0) {
@@ -7301,7 +7283,7 @@
                     // フェーズ2.5（既定 binarizer）が空振りした時のみ、同じクロップ領域に
                     // **Sauvola 二値化**（局所平均×局所標準偏差ベース、文書 OCR で標準）を
                     // 適用してから jsQR に渡す。第2QR の取りこぼしを大幅に削減する。
-                    if (detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
+                    if (false && detectedItems.length === 0 && scanStage === 3 && lastTwinBBox) {
                         const bbox = lastTwinBBox;
                         // ★ フェーズ2.5 と同じアスペクト比連動パディング
                         const _w2 = bbox.width, _h2 = bbox.height;
@@ -7462,7 +7444,7 @@
                     //   ・低照度で全体が灰色に潰れている
                     // 等のケースを救済する。半解像度（≒1/4 画素）で動かすので約 5–10ms で完走する。
                     // ★ P0-1(b): 2.8(Sauvola全画面) は偶数フレームのみ実行
-                    if (detectedItems.length === 0 && (fullScanFrameIdx % 2 === 0)) {
+                    if (false && detectedItems.length === 0 && (fullScanFrameIdx % 2 === 0)) {
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
                         const ADAPT_MAX_DIM = 960;
