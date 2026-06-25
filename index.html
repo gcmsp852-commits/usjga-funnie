@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader76</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1383,7 +1383,7 @@
                 const key = probe.reason;
                 phaseStats.jsqrProbeTotal += 1;
                 phaseStats.jsqrProbeCounts[key] = (phaseStats.jsqrProbeCounts[key] || 0) + 1;
-                if (phaseStats.jsqrProbeSamples.length < 8) {
+                if (phaseStats.jsqrProbeSamples.length < 8 || key === 'decode_success') {
                     phaseStats.jsqrProbeSamples.push({
                         reason: key,
                         stage: probe.stage || '',
@@ -1413,9 +1413,13 @@
                         blockCount: probe.blockCount !== undefined ? probe.blockCount : null,
                         fpRank: probe.fpRank !== undefined ? probe.fpRank : null,
                         fpRecentered: probe.fpRecentered !== undefined ? !!probe.fpRecentered : null,
+                        alignmentForcedExpected: probe.alignmentForcedExpected !== undefined ? !!probe.alignmentForcedExpected : null,
                         fpTopLeft: probe.fpTopLeft || null,
                         fpTopRight: probe.fpTopRight || null,
                         fpBottomLeft: probe.fpBottomLeft || null,
+                        fpTopLeftVideo: probe.fpTopLeftVideo || null,
+                        fpTopRightVideo: probe.fpTopRightVideo || null,
+                        fpBottomLeftVideo: probe.fpBottomLeftVideo || null,
                         fpScores: Array.isArray(probe.fpScores) ? probe.fpScores.slice(0, 3) : null,
                         sizeErr: probe.sizeErr !== undefined ? probe.sizeErr : null,
                         ratio: probe.ratio !== undefined ? probe.ratio : (probe.sideRatio !== undefined ? probe.sideRatio : null),
@@ -1426,12 +1430,24 @@
                         alignmentTolerance: probe.alignmentTolerance !== undefined ? probe.alignmentTolerance : null,
                         alignmentExpected: probe.alignmentExpected || null,
                         alignmentUsed: probe.alignmentUsed || null,
+                        alignmentExpectedVideo: probe.alignmentExpectedVideo || null,
+                        alignmentUsedVideo: probe.alignmentUsedVideo || null,
                         locationCorners: probe.locationCorners || null,
+                        locationCornersVideo: probe.locationCornersVideo || null,
+                        cropRect: probe.cropRect || null,
+                        q1IoU: probe.q1IoU !== undefined ? probe.q1IoU : null,
+                        expectedQ2IoU: probe.expectedQ2IoU !== undefined ? probe.expectedQ2IoU : null,
+                        moduleQuality: probe.moduleQuality || null,
                         bin: meta.bin || '',
                         scale: meta.scale || '',
                         rot: meta.rot || '',
                         dec: meta.dec || ''
                     });
+                    if (phaseStats.jsqrProbeSamples.length > 12) {
+                        const keep = phaseStats.jsqrProbeSamples.filter(s => s && s.reason === 'decode_success').slice(-4);
+                        const head = phaseStats.jsqrProbeSamples.filter(s => !s || s.reason !== 'decode_success').slice(0, 8);
+                        phaseStats.jsqrProbeSamples = head.concat(keep);
+                    }
                 }
             }
         }
@@ -1838,9 +1854,13 @@
                                     s.blockCount !== null ? `blocks=${s.blockCount}` : '',
                                     s.fpRank !== null ? `fpRank=${s.fpRank}` : '',
                                     s.fpRecentered !== null ? `rec=${s.fpRecentered ? 1 : 0}` : '',
+                                    s.alignmentForcedExpected !== null ? `alignFixed=${s.alignmentForcedExpected ? 1 : 0}` : '',
                                     s.fpTopLeft ? `fpTL=${fmtPoint(s.fpTopLeft)}` : '',
                                     s.fpTopRight ? `fpTR=${fmtPoint(s.fpTopRight)}` : '',
                                     s.fpBottomLeft ? `fpBL=${fmtPoint(s.fpBottomLeft)}` : '',
+                                    s.fpTopLeftVideo ? `fpTLv=${fmtPoint(s.fpTopLeftVideo)}` : '',
+                                    s.fpTopRightVideo ? `fpTRv=${fmtPoint(s.fpTopRightVideo)}` : '',
+                                    s.fpBottomLeftVideo ? `fpBLv=${fmtPoint(s.fpBottomLeftVideo)}` : '',
                                     Array.isArray(s.fpScores) ? `fpScore=${s.fpScores.map(fmtNum).join('/')}` : '',
                                     s.sizeErr !== null ? `sizeErr=${fmtNum(s.sizeErr)}` : '',
                                     s.ratio !== null ? `ratio=${fmtNum(s.ratio)}` : '',
@@ -1851,10 +1871,24 @@
                                     s.alignmentTolerance !== null ? `alignTol=${fmtNum(s.alignmentTolerance)}` : '',
                                     s.alignmentExpected ? `alignExp=${fmtPoint(s.alignmentExpected)}` : '',
                                     s.alignmentUsed ? `alignUse=${fmtPoint(s.alignmentUsed)}` : '',
+                                    s.alignmentExpectedVideo ? `alignExpV=${fmtPoint(s.alignmentExpectedVideo)}` : '',
+                                    s.alignmentUsedVideo ? `alignUseV=${fmtPoint(s.alignmentUsedVideo)}` : '',
+                                    s.cropRect ? `crop=${fmtRect(s.cropRect)}` : '',
+                                    s.q1IoU !== null ? `q1IoU=${fmtNum(s.q1IoU)}` : '',
+                                    s.expectedQ2IoU !== null ? `q2IoU=${fmtNum(s.expectedQ2IoU)}` : '',
                                     s.locationCorners ? `locTL=${fmtPoint(s.locationCorners.topLeft)}` : '',
                                     s.locationCorners ? `locTR=${fmtPoint(s.locationCorners.topRight)}` : '',
                                     s.locationCorners ? `locBR=${fmtPoint(s.locationCorners.bottomRight)}` : '',
                                     s.locationCorners ? `locBL=${fmtPoint(s.locationCorners.bottomLeft)}` : '',
+                                    s.locationCornersVideo ? `locTLv=${fmtPoint(s.locationCornersVideo.topLeft)}` : '',
+                                    s.locationCornersVideo ? `locTRv=${fmtPoint(s.locationCornersVideo.topRight)}` : '',
+                                    s.locationCornersVideo ? `locBRv=${fmtPoint(s.locationCornersVideo.bottomRight)}` : '',
+                                    s.locationCornersVideo ? `locBLv=${fmtPoint(s.locationCornersVideo.bottomLeft)}` : '',
+                                    s.moduleQuality && s.moduleQuality.moduleWeakPct !== undefined ? `weakAll=${fmtNum(s.moduleQuality.moduleWeakPct * 100)}%` : '',
+                                    s.moduleQuality && s.moduleQuality.dataModuleWeakPct !== undefined ? `weakData=${fmtNum(s.moduleQuality.dataModuleWeakPct * 100)}%` : '',
+                                    s.moduleQuality && s.moduleQuality.dataModuleAvgSame3x3 !== undefined ? `sameData=${fmtNum(s.moduleQuality.dataModuleAvgSame3x3)}` : '',
+                                    s.moduleQuality && Array.isArray(s.moduleQuality.weakRows) && s.moduleQuality.weakRows.length ? `weakRows=${s.moduleQuality.weakRows.map(r => r.i + ':' + r.n).join('/')}` : '',
+                                    s.moduleQuality && Array.isArray(s.moduleQuality.weakCols) && s.moduleQuality.weakCols.length ? `weakCols=${s.moduleQuality.weakCols.map(c => c.i + ':' + c.n).join('/')}` : '',
                                     s.scale ? `scale=${s.scale}` : '',
                                     s.bin ? `bin=${s.bin}` : '',
                                     s.rot !== '' ? `rot=${s.rot}` : '',
@@ -2653,7 +2687,16 @@
             const sw = Math.min(video.videoWidth - sx, Math.ceil(cropSize));
             const sh = Math.min(video.videoHeight - sy, Math.ceil(cropSize));
             if (sw <= 32 || sh <= 32) return null;
-            return { sx: sx, sy: sy, sw: sw, sh: sh, q2cx: q2cx, q2cy: q2cy, q1size: q1size, N: N };
+            return {
+                sx: sx, sy: sy, sw: sw, sh: sh,
+                q2cx: q2cx, q2cy: q2cy, q1size: q1size, N: N,
+                expectedQ2Rect: {
+                    x: q2cx - q1size / 2,
+                    y: q2cy - q1size / 2,
+                    width: q1size,
+                    height: q1size
+                }
+            };
         }
 
         // ★ Phase A: ツイン種別 → 第2QRデコード・プロファイルを1点で決定（全種を同一の即時プリロケートに集約）。
@@ -2756,6 +2799,22 @@
             const vh = video.videoHeight;
 
             let sawRaw = false, sawOther = false;
+            const debugQ1Rect = (profile && profile.firstQrPoints) ? rectFromPoints(profile.firstQrPoints) : null;
+            const debugExpectedQ2Box = (target === 'Q2' && profile && profile.firstQrPoints)
+                ? estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber)
+                : null;
+            const debugExpectedQ2Rect = debugExpectedQ2Box && debugExpectedQ2Box.expectedQ2Rect
+                ? debugExpectedQ2Box.expectedQ2Rect
+                : null;
+            const normalizeProbeCropRect = (r) => {
+                if (!r) return null;
+                return {
+                    sx: Number(r.sx ?? r.x ?? 0),
+                    sy: Number(r.sy ?? r.y ?? 0),
+                    sw: Number(r.sw ?? r.width ?? 0),
+                    sh: Number(r.sh ?? r.height ?? 0)
+                };
+            };
 
             // 1件の result を Q2 として採用できるか判定。採用なら Q2 オブジェクト、不可なら null。
             const acceptResult = (res, mapPt, binName, scaleTag, rotTag, decLabel) => {
@@ -2839,7 +2898,7 @@
 
             // RGBA を 二値化{native,Sauvola,Otsu} × optsList で復号し、最初に採用できた Q2 を返す。
             // mapPt(x,y): その画像座標を元動画座標へ写す関数。 scaleTag/rotTag: 当たった変種の記録用。
-            const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel, imageType = 'full') => {
+            const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel, imageType = 'full', debugMeta = {}) => {
                 const makeVariants = [
                     () => ({ name: 'native', d: rgba, pre: false }),
                     () => ({ name: 'sauvola', d: buildSauvolaBinaryFromRGBA(rgba, w, h, 0), pre: true }),
@@ -2861,6 +2920,10 @@
                         }
                         opts.debugProbe = true;
                         opts.probeCollector = [];
+                        opts._probeMapPoint = mapPt;
+                        opts._probeCropRect = normalizeProbeCropRect(debugMeta.cropRect);
+                        opts._probeQ1Rect = debugQ1Rect;
+                        opts._probeExpectedQ2Rect = debugExpectedQ2Rect;
                         recordJsQrInput(phaseLabel, imageType);
                         const _tp = nowPerf();
                         let r = null;
@@ -2914,7 +2977,8 @@
                     markJsQrCropRect(crop.sx, crop.sy, crop.sw, crop.sh, phase);
                     const hitS1Bd = tryDecode(cd.data, crop.sw, crop.sh,
                         (x, y) => ({ x: x + crop.sx, y: y + crop.sy }),
-                        `stage1-bd-other#${ci + 1}`, 0, phase, 'crop');
+                        `stage1-bd-other#${ci + 1}`, 0, phase, 'crop',
+                        { cropRect: crop });
                     if (hitS1Bd) return hitS1Bd;
                 }
             }
@@ -2929,7 +2993,8 @@
                     const cd = zxingCtx.getImageData(0, 0, q2box.sw, q2box.sh);
                     markJsQrCropRect(q2box.sx, q2box.sy, q2box.sw, q2box.sh, '共通F0 幾何クロップ');
                     const hitG = tryDecode(cd.data, q2box.sw, q2box.sh,
-                        (x, y) => ({ x: x + q2box.sx, y: y + q2box.sy }), 'geo', 0, '共通F0 幾何クロップ', 'crop');
+                        (x, y) => ({ x: x + q2box.sx, y: y + q2box.sy }), 'geo', 0, '共通F0 幾何クロップ', 'crop',
+                        { cropRect: q2box });
                     if (hitG) return hitG;
                 }
             }
@@ -2980,7 +3045,8 @@
                         const cd = zxingCtx.getImageData(0, 0, sw, sh);
                         markJsQrCropRect(sx, sy, sw, sh, '共通F1 BarcodeDetectorクロップ');
                         const hitB = tryDecode(cd.data, sw, sh,
-                            (x, y) => ({ x: x + sx, y: y + sy }), 'bd-crop', 0, '共通F1 BarcodeDetectorクロップ', 'crop');
+                            (x, y) => ({ x: x + sx, y: y + sy }), 'bd-crop', 0, '共通F1 BarcodeDetectorクロップ', 'crop',
+                            { cropRect: { sx, sy, sw, sh } });
                         if (hitB) {
                             if (target === 'Q1') saveStage1BdQ2Candidate(merged, hitB.points, hitB.versionNumber, box);
                             return hitB;
@@ -3003,7 +3069,8 @@
                 zxingCtx.drawImage(video, 0, 0, tw, th);
                 const data = zxingCtx.getImageData(0, 0, tw, th);
                 const inv = 1 / scale;
-                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }), maxDim, 0, fullPhaseLabel);
+                const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }), maxDim, 0, fullPhaseLabel, 'full',
+                    { cropRect: { sx: 0, sy: 0, sw: vw, sh: vh } });
                 if (hit) return hit;
 
                 // 回転バリアント（960スケール時のみ：方向性ノイズ対策の保険）
@@ -3012,7 +3079,8 @@
                     const hitR = tryDecode(rot.data, rot.width, rot.height, (rx, ry) => {
                         const p = unrotatePoint90(rx, ry, tw, th, 'cw');
                         return { x: p.x * inv, y: p.y * inv };
-                    }, maxDim, 90, fullPhaseLabel);
+                    }, maxDim, 90, fullPhaseLabel, 'full',
+                    { cropRect: { sx: 0, sy: 0, sw: vw, sh: vh } });
                     if (hitR) return hitR;
                 }
             }

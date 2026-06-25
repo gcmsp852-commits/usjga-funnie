@@ -375,11 +375,13 @@ function pushDebugProbe(options, reason, extra) {
     if (locationMeta) {
         probe.fpRank = locationMeta.fpRank;
         probe.fpRecentered = !!locationMeta.fpRecentered;
+        probe.alignmentForcedExpected = !!locationMeta.alignmentForcedExpected;
         probe.fpTopLeft = locationMeta.fpTopLeft;
         probe.fpTopRight = locationMeta.fpTopRight;
         probe.fpBottomLeft = locationMeta.fpBottomLeft;
         probe.fpScores = locationMeta.fpScores;
         probe.sizeErr = locationMeta.sizeErr;
+        probe.ratio = locationMeta.ratio;
         probe.sideRatio = locationMeta.sideRatio;
         probe.angleRatio = locationMeta.angleRatio;
         probe.geoErr = locationMeta.geoErr;
@@ -391,6 +393,63 @@ function pushDebugProbe(options, reason, extra) {
     }
     if (options && options._probeLocationCorners) {
         probe.locationCorners = options._probeLocationCorners;
+    }
+    if (options && options._probeCropRect) {
+        probe.cropRect = options._probeCropRect;
+    }
+    if (options && options._probeModuleQuality) {
+        probe.moduleQuality = options._probeModuleQuality;
+    }
+    var mapPoint = options && options._probeMapPoint;
+    var mapSafe = function (p) {
+        if (!p || !mapPoint) return null;
+        try {
+            return mapPoint(p.x, p.y);
+        }
+        catch (e) {
+            return null;
+        }
+    };
+    var rectFromCorners = function (c) {
+        if (!c) return null;
+        var pts = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft].filter(function (p) { return !!p; });
+        if (pts.length !== 4) return null;
+        var xs = pts.map(function (p) { return p.x; });
+        var ys = pts.map(function (p) { return p.y; });
+        var x1 = Math.min.apply(Math, xs), y1 = Math.min.apply(Math, ys);
+        var x2 = Math.max.apply(Math, xs), y2 = Math.max.apply(Math, ys);
+        return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    };
+    var rectIou = function (a, b) {
+        if (!a || !b) return null;
+        var ax = a.x !== undefined ? a.x : a.sx, ay = a.y !== undefined ? a.y : a.sy;
+        var aw = a.width !== undefined ? a.width : a.sw, ah = a.height !== undefined ? a.height : a.sh;
+        var bx = b.x !== undefined ? b.x : b.sx, by = b.y !== undefined ? b.y : b.sy;
+        var bw = b.width !== undefined ? b.width : b.sw, bh = b.height !== undefined ? b.height : b.sh;
+        if (!(aw > 0) || !(ah > 0) || !(bw > 0) || !(bh > 0)) return null;
+        var ix = Math.max(0, Math.min(ax + aw, bx + bw) - Math.max(ax, bx));
+        var iy = Math.max(0, Math.min(ay + ah, by + bh) - Math.max(ay, by));
+        var inter = ix * iy;
+        var union = aw * ah + bw * bh - inter;
+        return union > 0 ? inter / union : null;
+    };
+    if (locationMeta && mapPoint) {
+        probe.fpTopLeftVideo = mapSafe(locationMeta.fpTopLeft);
+        probe.fpTopRightVideo = mapSafe(locationMeta.fpTopRight);
+        probe.fpBottomLeftVideo = mapSafe(locationMeta.fpBottomLeft);
+        if (locationMeta.alignmentExpected) probe.alignmentExpectedVideo = mapSafe(locationMeta.alignmentExpected);
+        if (locationMeta.alignmentUsed) probe.alignmentUsedVideo = mapSafe(locationMeta.alignmentUsed);
+    }
+    if (options && options._probeLocationCorners && mapPoint) {
+        probe.locationCornersVideo = {
+            topLeft: mapSafe(options._probeLocationCorners.topLeft),
+            topRight: mapSafe(options._probeLocationCorners.topRight),
+            bottomRight: mapSafe(options._probeLocationCorners.bottomRight),
+            bottomLeft: mapSafe(options._probeLocationCorners.bottomLeft)
+        };
+        var locRect = rectFromCorners(probe.locationCornersVideo);
+        probe.q1IoU = rectIou(locRect, options._probeQ1Rect);
+        probe.expectedQ2IoU = rectIou(locRect, options._probeExpectedQ2Rect);
     }
     if (extra) {
         for (var k in extra) {
@@ -423,9 +482,13 @@ function scan(matrix, options) {
         options._probeLocationModuleSize = location_1.moduleSize;
         options._probeLocationMeta = location_1.probeMeta || null;
         options._probeLocationCorners = null;
+        options._probeModuleQuality = null;
+        options._probeModuleSameCounts = null;
         var extracted = void 0;
         try {
             extracted = extractor_1.extract(matrix, location_1);
+            options._probeModuleQuality = extracted.sampleStats || null;
+            options._probeModuleSameCounts = extracted.sampleSameCounts || null;
             options._probeLocationCorners = {
                 topLeft: extracted.mappingFunction(0, 0),
                 topRight: extracted.mappingFunction(location_1.dimension, 0),
@@ -740,6 +803,7 @@ function pushDebugProbe(options, reason, extra) {
     if (locationMeta) {
         probe.fpRank = locationMeta.fpRank;
         probe.fpRecentered = !!locationMeta.fpRecentered;
+        probe.alignmentForcedExpected = !!locationMeta.alignmentForcedExpected;
         probe.fpTopLeft = locationMeta.fpTopLeft;
         probe.fpTopRight = locationMeta.fpTopRight;
         probe.fpBottomLeft = locationMeta.fpBottomLeft;
@@ -757,6 +821,63 @@ function pushDebugProbe(options, reason, extra) {
     }
     if (options && options._probeLocationCorners) {
         probe.locationCorners = options._probeLocationCorners;
+    }
+    if (options && options._probeCropRect) {
+        probe.cropRect = options._probeCropRect;
+    }
+    if (options && options._probeModuleQuality) {
+        probe.moduleQuality = options._probeModuleQuality;
+    }
+    var mapPoint = options && options._probeMapPoint;
+    var mapSafe = function (p) {
+        if (!p || !mapPoint) return null;
+        try {
+            return mapPoint(p.x, p.y);
+        }
+        catch (e) {
+            return null;
+        }
+    };
+    var rectFromCorners = function (c) {
+        if (!c) return null;
+        var pts = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft].filter(function (p) { return !!p; });
+        if (pts.length !== 4) return null;
+        var xs = pts.map(function (p) { return p.x; });
+        var ys = pts.map(function (p) { return p.y; });
+        var x1 = Math.min.apply(Math, xs), y1 = Math.min.apply(Math, ys);
+        var x2 = Math.max.apply(Math, xs), y2 = Math.max.apply(Math, ys);
+        return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    };
+    var rectIou = function (a, b) {
+        if (!a || !b) return null;
+        var ax = a.x !== undefined ? a.x : a.sx, ay = a.y !== undefined ? a.y : a.sy;
+        var aw = a.width !== undefined ? a.width : a.sw, ah = a.height !== undefined ? a.height : a.sh;
+        var bx = b.x !== undefined ? b.x : b.sx, by = b.y !== undefined ? b.y : b.sy;
+        var bw = b.width !== undefined ? b.width : b.sw, bh = b.height !== undefined ? b.height : b.sh;
+        if (!(aw > 0) || !(ah > 0) || !(bw > 0) || !(bh > 0)) return null;
+        var ix = Math.max(0, Math.min(ax + aw, bx + bw) - Math.max(ax, bx));
+        var iy = Math.max(0, Math.min(ay + ah, by + bh) - Math.max(ay, by));
+        var inter = ix * iy;
+        var union = aw * ah + bw * bh - inter;
+        return union > 0 ? inter / union : null;
+    };
+    if (locationMeta && mapPoint) {
+        probe.fpTopLeftVideo = mapSafe(locationMeta.fpTopLeft);
+        probe.fpTopRightVideo = mapSafe(locationMeta.fpTopRight);
+        probe.fpBottomLeftVideo = mapSafe(locationMeta.fpBottomLeft);
+        if (locationMeta.alignmentExpected) probe.alignmentExpectedVideo = mapSafe(locationMeta.alignmentExpected);
+        if (locationMeta.alignmentUsed) probe.alignmentUsedVideo = mapSafe(locationMeta.alignmentUsed);
+    }
+    if (options && options._probeLocationCorners && mapPoint) {
+        probe.locationCornersVideo = {
+            topLeft: mapSafe(options._probeLocationCorners.topLeft),
+            topRight: mapSafe(options._probeLocationCorners.topRight),
+            bottomRight: mapSafe(options._probeLocationCorners.bottomRight),
+            bottomLeft: mapSafe(options._probeLocationCorners.bottomLeft)
+        };
+        var locRect = rectFromCorners(probe.locationCornersVideo);
+        probe.q1IoU = rectIou(locRect, options._probeQ1Rect);
+        probe.expectedQ2IoU = rectIou(locRect, options._probeExpectedQ2Rect);
     }
     if (extra) {
         for (var k in extra) {
@@ -869,6 +990,54 @@ function readCodewords(matrix, version, formatInfo) {
         readingUp = !readingUp;
     }
     return codewords;
+}
+function buildModuleQualityStats(version, sameCounts) {
+    if (!version || !sameCounts) return null;
+    var dimension = 17 + 4 * version.versionNumber;
+    var functionPatternMask = buildFunctionPatternMask(version);
+    var dataTotal = 0;
+    var dataWeak = 0;
+    var dataVeryWeak = 0;
+    var sameTotal = 0;
+    var rowWeak = new Array(dimension);
+    var colWeak = new Array(dimension);
+    for (var i = 0; i < dimension; i++) {
+        rowWeak[i] = 0;
+        colWeak[i] = 0;
+    }
+    for (var y = 0; y < dimension; y++) {
+        for (var x = 0; x < dimension; x++) {
+            if (functionPatternMask.get(x, y)) continue;
+            var same = sameCounts[y * dimension + x];
+            dataTotal++;
+            sameTotal += same;
+            if (same <= 4) {
+                dataWeak++;
+                rowWeak[y]++;
+                colWeak[x]++;
+            }
+            if (same <= 3) {
+                dataVeryWeak++;
+            }
+        }
+    }
+    var topRows = rowWeak.map(function (v, idx) { return { i: idx, n: v }; })
+        .sort(function (a, b) { return b.n - a.n; })
+        .slice(0, 4)
+        .filter(function (v) { return v.n > 0; });
+    var topCols = colWeak.map(function (v, idx) { return { i: idx, n: v }; })
+        .sort(function (a, b) { return b.n - a.n; })
+        .slice(0, 4)
+        .filter(function (v) { return v.n > 0; });
+    return {
+        dataModuleTotal: dataTotal,
+        dataModuleWeak: dataWeak,
+        dataModuleWeakPct: dataWeak / Math.max(1, dataTotal),
+        dataModuleVeryWeak: dataVeryWeak,
+        dataModuleAvgSame3x3: sameTotal / Math.max(1, dataTotal),
+        weakRows: topRows,
+        weakCols: topCols
+    };
 }
 function readVersion(matrix) {
     var dimension = matrix.height;
@@ -1102,6 +1271,7 @@ function decodeMatrix(matrix, options) {
         pushDebugProbe(options, "no_format", {
             stage: "read_format",
             versionNumber: version.versionNumber,
+            moduleQuality: buildModuleQualityStats(version, options ? options._probeModuleSameCounts : null),
             formatBestDiff: formatProbe.formatBestDiff,
             formatBestEc: formatProbe.formatBestInfo ? formatProbe.formatBestInfo.errorCorrectionLevel : null,
             formatBestMask: formatProbe.formatBestInfo ? formatProbe.formatBestInfo.dataMask : null,
@@ -1112,6 +1282,7 @@ function decodeMatrix(matrix, options) {
         return null;
     }
     var codewords = readCodewords(matrix, version, formatInfo);
+    var dataModuleQuality = buildModuleQualityStats(version, options ? options._probeModuleSameCounts : null);
     // ★ 追加：寸止めロジック（RAWデータ抽出）
     // extractRawOnly が true の場合、XORや誤り訂正を行わず、ここでRAWデータを返す
     if (options && options.extractRawOnly) {
@@ -1140,6 +1311,7 @@ function decodeMatrix(matrix, options) {
             versionNumber: version.versionNumber,
             ecLevel: ecLevel,
             dataMask: formatInfo.dataMask,
+            moduleQuality: dataModuleQuality,
             codewordsLen: codewords ? codewords.length : null,
             totalCodewords: totalCodewords
         });
@@ -1166,6 +1338,7 @@ function decodeMatrix(matrix, options) {
                 totalCodewords: totalCodewords,
                 totalDataCodewords: totalBytes,
                 blockCount: dataBlocks.length,
+                moduleQuality: dataModuleQuality,
                 rsFailureStage: rsDiag ? rsDiag.failureStage : null,
                 syndromeWeight: rsDiag ? rsDiag.syndromeWeight : null,
                 correctableSymbols: rsDiag ? rsDiag.correctableSymbols : Math.floor((dataBlock.codewords.length - dataBlock.numDataCodewords) / 2),
@@ -1220,6 +1393,16 @@ function decodeMatrix(matrix, options) {
             }
         }
         var res = decodeData_1.decode(decodeBytes, version.versionNumber);
+        pushDebugProbe(options, "decode_success", {
+            stage: "decode_success",
+            versionNumber: version.versionNumber,
+            ecLevel: ecLevel,
+            dataMask: formatInfo.dataMask,
+            moduleQuality: dataModuleQuality,
+            totalCodewords: totalCodewords,
+            totalDataCodewords: totalBytes,
+            blockCount: dataBlocks.length
+        });
         res.version = version;
         res.versionNumber = version.versionNumber;
         res.codewords = correctedCodewords; // ★ RS訂正済み再インタリーブコード語
@@ -1238,6 +1421,7 @@ function decodeMatrix(matrix, options) {
             versionNumber: version.versionNumber,
             ecLevel: ecLevel,
             dataMask: formatInfo.dataMask,
+            moduleQuality: dataModuleQuality,
             dataBytesLen: resultBytes ? resultBytes.length : null
         });
         if (options && (options.extractRawForFailed || options.captureAppEncDataBytes)) {
@@ -10301,6 +10485,10 @@ function extract(image, location) {
     var sToQ = squareToQuadrilateral(location.topLeft, location.topRight, location.alignmentPattern, location.bottomLeft);
     var transform = times(sToQ, qToS);
     var matrix = BitMatrix_1.BitMatrix.createEmpty(location.dimension, location.dimension);
+    var sampleSameCounts = new Uint8ClampedArray(location.dimension * location.dimension);
+    var sampleSameTotal = 0;
+    var sampleWeakCount = 0;
+    var sampleMinSame = 9;
     var mappingFunction = function (x, y) {
         var denominator = transform.a13 * x + transform.a23 * y + transform.a33;
         return {
@@ -10313,12 +10501,33 @@ function extract(image, location) {
             var xValue = x + 0.5;
             var yValue = y + 0.5;
             var sourcePixel = mappingFunction(xValue, yValue);
-            matrix.set(x, y, image.get(Math.floor(sourcePixel.x), Math.floor(sourcePixel.y)));
+            var sx = Math.floor(sourcePixel.x);
+            var sy = Math.floor(sourcePixel.y);
+            var center = image.get(sx, sy);
+            var same = 0;
+            for (var yy = sy - 1; yy <= sy + 1; yy++) {
+                for (var xx = sx - 1; xx <= sx + 1; xx++) {
+                    if (image.get(xx, yy) === center) same++;
+                }
+            }
+            sampleSameCounts[y * location.dimension + x] = same;
+            sampleSameTotal += same;
+            if (same <= 4) sampleWeakCount++;
+            if (same < sampleMinSame) sampleMinSame = same;
+            matrix.set(x, y, center);
         }
     }
     return {
         matrix: matrix,
         mappingFunction: mappingFunction,
+        sampleSameCounts: sampleSameCounts,
+        sampleStats: {
+            moduleTotal: location.dimension * location.dimension,
+            moduleWeak: sampleWeakCount,
+            moduleWeakPct: sampleWeakCount / Math.max(1, location.dimension * location.dimension),
+            moduleAvgSame3x3: sampleSameTotal / Math.max(1, location.dimension * location.dimension),
+            moduleMinSame3x3: sampleMinSame
+        },
     };
 }
 exports.extract = extract;
@@ -10663,10 +10872,11 @@ function locate(matrix, options) {
     var pointMeta = function (p) {
         return p ? { x: p.x, y: p.y, score: p.score, size: p.size } : null;
     };
-    var makeProbeMeta = function (rank, recentered, tl, tr, bl, group, alignment) {
+    var makeProbeMeta = function (rank, recentered, tl, tr, bl, group, alignment, forcedExpected) {
         return {
             fpRank: rank,
             fpRecentered: !!recentered,
+            alignmentForcedExpected: !!forcedExpected,
             fpTopLeft: pointMeta(tl),
             fpTopRight: pointMeta(tr),
             fpBottomLeft: pointMeta(bl),
@@ -10697,6 +10907,17 @@ function locate(matrix, options) {
                 topRight: { x: topRight.x, y: topRight.y },
                 probeMeta: makeProbeMeta(_i, false, topLeft, topRight, bottomLeft, group, alignment),
             });
+            if (options && options.debugProbe && alignment.alignmentUsed && alignment.alignmentExpected) {
+                result.push({
+                    alignmentPattern: { x: alignment.alignmentExpected.x, y: alignment.alignmentExpected.y },
+                    bottomLeft: { x: bottomLeft.x, y: bottomLeft.y },
+                    dimension: alignment.dimension,
+                    moduleSize: alignment.moduleSize,
+                    topLeft: { x: topLeft.x, y: topLeft.y },
+                    topRight: { x: topRight.x, y: topRight.y },
+                    probeMeta: makeProbeMeta(_i, false, topLeft, topRight, bottomLeft, group, alignment, true),
+                });
+            }
             // singleLocate でも Ver5/Ver6 では候補差が小さいため、少し余分に試す。
             if (isSingle && result.length >= 3) break;
         }
@@ -10715,6 +10936,17 @@ function locate(matrix, options) {
                 topRight: { x: midTopRight.x, y: midTopRight.y },
                 probeMeta: makeProbeMeta(_i, true, midTopLeft, midTopRight, midBottomLeft, group, centeredAlignment),
             });
+            if (options && options.debugProbe && centeredAlignment.alignmentUsed && centeredAlignment.alignmentExpected) {
+                result.push({
+                    alignmentPattern: { x: centeredAlignment.alignmentExpected.x, y: centeredAlignment.alignmentExpected.y },
+                    bottomLeft: { x: midBottomLeft.x, y: midBottomLeft.y },
+                    dimension: centeredAlignment.dimension,
+                    moduleSize: centeredAlignment.moduleSize,
+                    topLeft: { x: midTopLeft.x, y: midTopLeft.y },
+                    topRight: { x: midTopRight.x, y: midTopRight.y },
+                    probeMeta: makeProbeMeta(_i, true, midTopLeft, midTopRight, midBottomLeft, group, centeredAlignment, true),
+                });
+            }
             if (isSingle && result.length >= 3) break;
         }
     }
