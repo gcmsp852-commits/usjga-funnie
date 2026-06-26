@@ -353,7 +353,6 @@ function buildBitMatrixFromBinary(data, width, height, returnInverted) {
     return { binarized: binarized, inverted: inverted };
 }
 function pushDebugProbe(options, reason, extra) {
-    return; // ★ 読取デバッグ probe は無効化済み（データを取得しない）
     if (!options || !options.debugProbe || !options.probeCollector) {
         return;
     }
@@ -826,7 +825,6 @@ function pushBit(bit, byte) {
     return (byte << 1) | bit;
 }
 function pushDebugProbe(options, reason, extra) {
-    return; // ★ 読取デバッグ probe は無効化済み（データを取得しない）
     if (!options || !options.debugProbe || !options.probeCollector) {
         return;
     }

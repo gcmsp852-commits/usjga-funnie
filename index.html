@@ -80,6 +80,7 @@
         .qr-data-card .mgmt { font-size: 0.8rem; color: #4CAF50; font-family: monospace; margin-top: 4px; }
         #resultScreen { justify-content: flex-start; overflow-y: auto; }
         #resultScreen .overlay-box { max-height: calc(100dvh - 40px); overflow-y: auto; max-width: 520px; }
+        #scanStatsText { max-height: 34dvh; overflow-y: auto; overflow-x: auto; font-size: 0.82rem; line-height: 1.35; word-break: normal; white-space: pre; }
         
         .enc-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; }
         .enc-badge.sys { background: rgba(255,111,0,0.2); color: #FF6F00; border: 1px solid rgba(255,111,0,0.4); }
@@ -88,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -111,6 +112,14 @@
                 <button class="btn" id="startScanBtn">スキャン開始</button>
                 <button class="btn" id="colorEncModeBtn" style="background-color:#00897B; display:none;">カラー符号化モード</button>
                 <button class="btn secondary" id="logoutBtn" style="margin-top:10px; font-size:0.9rem;">端末情報を変更</button>
+                <!-- ★ 読取向き（縦/横）選択。押す度に切替。デフォルト=縦向き -->
+                <button class="btn secondary" id="orientationBtn" style="margin-top:10px; font-size:0.9rem; background-color:#1565c0; border-color:#1976d2;" onclick="toggleReadOrientation()">読取向き: 縦向き</button>
+                <!-- ★ 読取デバッグログ（蓄積）操作 -->
+                <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
+                    <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px;" onclick="copyAllDebugLog()">デバッグログコピー</button>
+                    <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; background-color:#7f1d1d; border-color:#a33;" onclick="confirmClearDebugLog()">デバッグログ削除</button>
+                </div>
+                <div id="debugLogCountLabel" style="margin-top:6px; font-size:0.8rem; color:#aaa;">蓄積ログ 0 件</div>
             </div>
         </div>
     </div>
@@ -147,6 +156,16 @@
                 <button class="btn" style="margin-top:8px;" onclick="saveTimeoutComment()">コメントを蓄積して閉じる</button>
             </div>
             <button class="btn secondary" onclick="restartScan()">コメントなしでもう一度スキャン</button>
+        </div>
+    </div>
+
+    <!-- デバッグログ削除 確認モーダル -->
+    <div class="overlay-screen" id="debugClearModal" style="display:none;">
+        <div class="overlay-box">
+            <h2 style="color:#ff5252;">デバッグログを消去します</h2>
+            <p>蓄積した読取デバッグ情報を全て消去します。<br>よろしいですか？</p>
+            <button class="btn" style="background-color:#7f1d1d; border-color:#a33;" onclick="doClearDebugLog()">はい、消去する</button>
+            <button class="btn secondary" onclick="cancelClearDebugLog()">いいえ</button>
         </div>
     </div>
 
@@ -231,6 +250,11 @@
                 <div id="dsImageContainer" style="margin-top:12px; text-align:center; display:none;">
                     <img id="dsImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
                 </div>
+            </div>
+            <div class="qr-data-card" id="scanStatsCard" style="border-color:#FF1744; margin-top:12px;">
+                <label style="color:#FF1744;">読取デバッグ情報</label>
+                <div class="text" id="scanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
+                <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; margin-top:8px;" onclick="copyScanDebugInfo()">コピー</button>
             </div>
             <button class="btn" onclick="restartScan()">もう一度スキャン</button>
         </div>
@@ -833,9 +857,24 @@
         // ★ P0-3: ネイティブBD不発時の補助検出（回転/二値化canvas）用オフスクリーン
         let _bdAuxCanvas = null, _bdAuxCtx = null;
 
-        // ★ 読取向き（既定=縦向き）。手動切替UIは廃止。デバッグ統計の表示ラベル用にのみ保持。
+        // ★ 読取向き（手動選択）。デフォルト=縦向き。トップ画面のボタンで切替え、localStorage に保持。
+        const READ_ORIENT_KEY = 'QR_READ_ORIENTATION';
         let readOrientationManual = 'portrait';
+        try {
+            const _o = localStorage.getItem(READ_ORIENT_KEY);
+            if (_o === 'portrait' || _o === 'landscape') readOrientationManual = _o;
+        } catch (e) { /* ignore */ }
         function orientationLabel(o) { return (o === 'landscape') ? '横向き' : '縦向き'; }
+        function updateOrientationBtnUI() {
+            const btn = document.getElementById('orientationBtn');
+            if (btn) btn.textContent = '読取向き: ' + orientationLabel(readOrientationManual);
+        }
+        function toggleReadOrientation() {
+            readOrientationManual = (readOrientationManual === 'portrait') ? 'landscape' : 'portrait';
+            try { localStorage.setItem(READ_ORIENT_KEY, readOrientationManual); } catch (e) { /* ignore */ }
+            updateOrientationBtnUI();
+            if (typeof statusText !== 'undefined' && statusText) statusText.innerText = '読取向きを「' + orientationLabel(readOrientationManual) + '」にしました';
+        }
 
         // ★ 10秒タイムアウト：QRツイン読取開始から10秒で打ち切り、取得済み情報でデバッグ表示＆蓄積。
         const SCAN_TIMEOUT_MS = 10000;
@@ -1342,7 +1381,82 @@
             else phaseStats.jsqrMs += ms;
         }
 
-        // ★ 読取デバッグ probe は無効化（データを取得しない）。jsQR 側の probe 収集も停止済み。
+        function recordJsQrProbes(stage, phase, probes, meta = {}) {
+            if (!Array.isArray(probes) || probes.length === 0) return;
+            const phaseStats = getPhaseDebugStats(stage, phase);
+            for (const probe of probes) {
+                if (!probe || !probe.reason) continue;
+                const key = probe.reason;
+                phaseStats.jsqrProbeTotal += 1;
+                phaseStats.jsqrProbeCounts[key] = (phaseStats.jsqrProbeCounts[key] || 0) + 1;
+                if (phaseStats.jsqrProbeSamples.length < 8 || key === 'decode_success') {
+                    phaseStats.jsqrProbeSamples.push({
+                        reason: key,
+                        stage: probe.stage || '',
+                        version: probe.versionNumber || null,
+                        ec: probe.ecLevel !== undefined ? probe.ecLevel : null,
+                        mask: probe.dataMask !== undefined ? probe.dataMask : null,
+                        locationIndex: probe.locationIndex !== undefined ? probe.locationIndex : null,
+                        dimension: probe.dimension || null,
+                        moduleSize: probe.moduleSize !== undefined && probe.moduleSize !== null ? probe.moduleSize : null,
+                        provisionalVersion: probe.provisionalVersion !== undefined ? probe.provisionalVersion : null,
+                        versionBestDiff: probe.versionBestDiff !== undefined ? probe.versionBestDiff : null,
+                        versionBestNumber: probe.versionBestNumber !== undefined ? probe.versionBestNumber : null,
+                        expectedVersionNumber: probe.expectedVersionNumber !== undefined ? probe.expectedVersionNumber : null,
+                        expectedDimension: probe.expectedDimension !== undefined ? probe.expectedDimension : null,
+                        formatBestDiff: probe.formatBestDiff !== undefined ? probe.formatBestDiff : null,
+                        formatBestEc: probe.formatBestEc !== undefined ? probe.formatBestEc : null,
+                        formatBestMask: probe.formatBestMask !== undefined ? probe.formatBestMask : null,
+                        rsFailureStage: probe.rsFailureStage || '',
+                        syndromeWeight: probe.syndromeWeight !== undefined ? probe.syndromeWeight : null,
+                        correctableSymbols: probe.correctableSymbols !== undefined ? probe.correctableSymbols : null,
+                        errorLocatorDegree: probe.errorLocatorDegree !== undefined ? probe.errorLocatorDegree : null,
+                        errorLocationsCount: probe.errorLocationsCount !== undefined ? probe.errorLocationsCount : null,
+                        blockIndex: probe.blockIndex !== undefined ? probe.blockIndex : null,
+                        blockCodewords: probe.blockCodewords !== undefined ? probe.blockCodewords : null,
+                        dataCodewords: probe.dataCodewords !== undefined ? probe.dataCodewords : null,
+                        eccCodewords: probe.eccCodewords !== undefined ? probe.eccCodewords : null,
+                        blockCount: probe.blockCount !== undefined ? probe.blockCount : null,
+                        fpRank: probe.fpRank !== undefined ? probe.fpRank : null,
+                        fpRecentered: probe.fpRecentered !== undefined ? !!probe.fpRecentered : null,
+                        alignmentForcedExpected: probe.alignmentForcedExpected !== undefined ? !!probe.alignmentForcedExpected : null,
+                        fpTopLeft: probe.fpTopLeft || null,
+                        fpTopRight: probe.fpTopRight || null,
+                        fpBottomLeft: probe.fpBottomLeft || null,
+                        fpTopLeftVideo: probe.fpTopLeftVideo || null,
+                        fpTopRightVideo: probe.fpTopRightVideo || null,
+                        fpBottomLeftVideo: probe.fpBottomLeftVideo || null,
+                        fpScores: Array.isArray(probe.fpScores) ? probe.fpScores.slice(0, 3) : null,
+                        sizeErr: probe.sizeErr !== undefined ? probe.sizeErr : null,
+                        ratio: probe.ratio !== undefined ? probe.ratio : (probe.sideRatio !== undefined ? probe.sideRatio : null),
+                        angleRatio: probe.angleRatio !== undefined ? probe.angleRatio : null,
+                        geoErr: probe.geoErr !== undefined ? probe.geoErr : null,
+                        groupScore: probe.groupScore !== undefined ? probe.groupScore : null,
+                        alignmentDistance: probe.alignmentDistance !== undefined ? probe.alignmentDistance : null,
+                        alignmentTolerance: probe.alignmentTolerance !== undefined ? probe.alignmentTolerance : null,
+                        alignmentExpected: probe.alignmentExpected || null,
+                        alignmentUsed: probe.alignmentUsed || null,
+                        alignmentExpectedVideo: probe.alignmentExpectedVideo || null,
+                        alignmentUsedVideo: probe.alignmentUsedVideo || null,
+                        locationCorners: probe.locationCorners || null,
+                        locationCornersVideo: probe.locationCornersVideo || null,
+                        cropRect: probe.cropRect || null,
+                        q1IoU: probe.q1IoU !== undefined ? probe.q1IoU : null,
+                        expectedQ2IoU: probe.expectedQ2IoU !== undefined ? probe.expectedQ2IoU : null,
+                        moduleQuality: probe.moduleQuality || null,
+                        bin: meta.bin || '',
+                        scale: meta.scale || '',
+                        rot: meta.rot || '',
+                        dec: meta.dec || ''
+                    });
+                    if (phaseStats.jsqrProbeSamples.length > 12) {
+                        const keep = phaseStats.jsqrProbeSamples.filter(s => s && s.reason === 'decode_success').slice(-4);
+                        const head = phaseStats.jsqrProbeSamples.filter(s => !s || s.reason !== 'decode_success').slice(0, 8);
+                        phaseStats.jsqrProbeSamples = head.concat(keep);
+                    }
+                }
+            }
+        }
 
         // ★ P3: BarcodeDetector.detect を時間計測つきで呼ぶ（フェーズ別 bdMs に加算）
         async function timedDetect(phase, source, stage = scanStage) {
@@ -1814,6 +1928,11 @@
             return lines.join('\n');
         }
 
+        function renderScanDebugStats() {
+            const el = document.getElementById('scanStatsText');
+            if (el) el.innerText = formatScanDebugStats();
+        }
+
         async function copyScanDebugInfo() {
             const text = formatScanDebugStats();
             try {
@@ -1838,7 +1957,8 @@
 
         // ============================================================
         //  ★ 読取デバッグ情報の「蓄積」（試行をまたいで保持）
-        //    localStorage に試行毎のレコードを追記。10秒タイムアウト時のコメント蓄積に使用。
+        //    localStorage に試行毎のレコードを追記。トップ画面の
+        //    「デバッグログコピー」で全件コピー、「デバッグログ削除」で消去。
         // ============================================================
         const DEBUG_LOG_KEY = 'QR_DEBUG_LOG_V1';
         const DEBUG_LOG_MAX = 500; // 上限件数（古いものから破棄）
@@ -1849,6 +1969,12 @@
         }
         function saveDebugLog(arr) {
             try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(arr)); } catch (e) { /* quota等は無視 */ }
+        }
+        function getDebugLogCount() { return loadDebugLog().length; }
+
+        function updateDebugLogCountUI() {
+            const el = document.getElementById('debugLogCountLabel');
+            if (el) el.textContent = '蓄積ログ ' + getDebugLogCount() + ' 件';
         }
 
         // 現在の読取（1試行）の計測を、蓄積ログへ1レコード追記する。
@@ -1890,6 +2016,7 @@
             log.push(rec);
             while (log.length > DEBUG_LOG_MAX) log.shift();
             saveDebugLog(log);
+            updateDebugLogCountUI();
             return id;
         }
 
@@ -1905,6 +2032,90 @@
             rec.text = rec.text + '\n' + tag + ' ' + comment;
             saveDebugLog(log);
             return true;
+        }
+
+        // 蓄積ログ全体を1テキストへ（先頭に集計サマリ）
+        function formatAccumulatedDebugLog() {
+            const log = loadDebugLog();
+            if (!log.length) return 'デバッグログは空です。';
+            const lines = [];
+            lines.push('■ 読取デバッグログ（蓄積）');
+            lines.push('件数: ' + log.length + ' / 出力: ' + new Date().toISOString());
+            // 簡易集計：種別×平均第2QR確定ms、配置fp×平均ms（遅い配置の発見用）
+            const agg = {};
+            for (const r of log) {
+                const key = (r.q2Type || r.q1Type || '不明');
+                if (!agg[key]) agg[key] = { n: 0, sum: 0 };
+                if (r.secondSuccessMs != null) { agg[key].n++; agg[key].sum += r.secondSuccessMs; }
+            }
+            lines.push('— 種別別の平均 第2QR確定ms —');
+            Object.keys(agg).forEach(k => {
+                const a = agg[k];
+                lines.push('  ' + k + ': n=' + a.n + ' avg=' + (a.n ? Math.round(a.sum / a.n) : '-') + 'ms');
+            });
+            // 読取向き別（手動選択）× 第2QR確定ms（縦横差の確認用）
+            const oAgg = {};
+            for (const r of log) {
+                const ok = orientationLabel(r.orientation || 'portrait');
+                if (!oAgg[ok]) oAgg[ok] = { n: 0, sum: 0, cnt: 0 };
+                oAgg[ok].cnt++;
+                if (r.secondSuccessMs != null) { oAgg[ok].n++; oAgg[ok].sum += r.secondSuccessMs; }
+            }
+            lines.push('— 読取向き別(手動選択)の平均 第2QR確定ms —');
+            Object.keys(oAgg).forEach(k => {
+                const a = oAgg[k];
+                lines.push('  ' + k + ': 試行' + a.cnt + '件 / n=' + a.n + ' avg=' + (a.n ? Math.round(a.sum / a.n) : '-') + 'ms');
+            });
+            // 配置fp別（遅い配置パターン検出）
+            const fpAgg = {};
+            for (const r of log) {
+                const fp = r.q2Fp || r.q1Fp; if (!fp) continue;
+                if (!fpAgg[fp]) fpAgg[fp] = { n: 0, sum: 0 };
+                if (r.secondSuccessMs != null) { fpAgg[fp].n++; fpAgg[fp].sum += r.secondSuccessMs; }
+            }
+            const fpRows = Object.keys(fpAgg).map(fp => ({ fp, n: fpAgg[fp].n, avg: fpAgg[fp].n ? Math.round(fpAgg[fp].sum / fpAgg[fp].n) : null }))
+                .filter(x => x.avg != null).sort((a, b) => b.avg - a.avg);
+            if (fpRows.length) {
+                lines.push('— 配置fp別の平均 第2QR確定ms（遅い順 上位20） —');
+                fpRows.slice(0, 20).forEach(x => lines.push('  fp=' + x.fp + ': n=' + x.n + ' avg=' + x.avg + 'ms'));
+            }
+            lines.push('========================================');
+            lines.push('');
+            for (const rec of log) { lines.push(rec.text); lines.push(''); }
+            return lines.join('\n');
+        }
+
+        async function copyAllDebugLog() {
+            const text = formatAccumulatedDebugLog();
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+                    document.body.appendChild(ta); ta.focus(); ta.select();
+                    document.execCommand('copy'); document.body.removeChild(ta);
+                }
+                if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'デバッグログ(' + getDebugLogCount() + '件)をコピーしました';
+            } catch (e) {
+                if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'コピーに失敗しました';
+            }
+        }
+
+        // 削除（誤操作防止のため確認モーダルを経由）
+        function confirmClearDebugLog() {
+            const m = document.getElementById('debugClearModal');
+            if (m) m.style.display = 'flex';
+        }
+        function cancelClearDebugLog() {
+            const m = document.getElementById('debugClearModal');
+            if (m) m.style.display = 'none';
+        }
+        function doClearDebugLog() {
+            saveDebugLog([]);
+            updateDebugLogCountUI();
+            cancelClearDebugLog();
+            if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'デバッグログを消去しました';
         }
 
         // ★ 10秒タイムアウト：読み取りを打ち切り、取得済み情報でデバッグ表示＆蓄積し、コメント欄を出す。
@@ -1951,7 +2162,9 @@
             restartScan();
         }
 
-        // 起動時の蓄積件数表示・読取向きボタンUIは廃止済み。
+        // 起動時に蓄積件数・読取向きボタンを初期化
+        try { updateDebugLogCountUI(); updateOrientationBtnUI(); } catch (e) { /* DOM未準備なら load で */ }
+        window.addEventListener('load', function () { try { updateDebugLogCountUI(); updateOrientationBtnUI(); } catch (e) {} });
 
         function drawJsQrCropDebugRects() {
             const now = Date.now();
@@ -2503,6 +2716,14 @@
         //   - digitalsign : sysEncDecode
         //   - appenc      : sysEncDecode + captureAppEncDataBytes で生暗号文E を捕捉（acceptRawAppEnc）
         function buildTwinProfile(mgmtInfo) {
+            if (isNewColorMgmtInfo(mgmtInfo)) {
+                return {
+                    kind: 'newcolor',
+                    winTag: 'new_color',
+                    optsList: [ {} ],
+                    newColorMgmtInfo: normalizeNewColorMgmtInfo(mgmtInfo)
+                };
+            }
             if (mgmtInfo && mgmtInfo.appEncFlag) {
                 return {
                     kind: 'appenc',
@@ -2528,6 +2749,10 @@
             const profile = buildTwinProfile(mgmtInfo);
             profile.firstQrPoints = getFirstQrGeometryForQ2();
             profile.firstQrVersionNumber = firstQR && firstQR.versionNumber;
+            if (profile.kind === 'newcolor') {
+                profile.newColorQ1Data = buildNewColorQ1DataFromFirstQR(profile.newColorMgmtInfo);
+                profile.newColorResult = newColorScanResult;
+            }
             return profile;
         }
 
@@ -2541,7 +2766,14 @@
 
         function buildQ2ProfileForStage3() {
             let profile;
-            if (appMask) {
+            const firstMgmt = newColorQ1Data && newColorQ1Data.mgmtInfo
+                ? newColorQ1Data.mgmtInfo
+                : (firstQR ? parseStandardMgmt(getManagementCode32FromParts(firstQR.managementCode32 ?? firstQR.managementCode, firstQR.managementFlags16)) : null);
+            if (isNewColorMgmtInfo(firstMgmt)) {
+                profile = buildTwinProfile(firstMgmt);
+                profile.newColorQ1Data = newColorQ1Data || buildNewColorQ1DataFromFirstQR(profile.newColorMgmtInfo);
+                profile.newColorResult = newColorScanResult;
+            } else if (appMask) {
                 profile = {
                     kind: 'appenc',
                     winTag: 'appEnc stage3',
@@ -2563,6 +2795,24 @@
         async function dispatchQ2Found(profile, q2, modeHint = scanMode) {
             if (!q2) return false;
             const kind = profile && profile.kind;
+            if (kind === 'newcolor') {
+                const q1Data = q2.newColorQ1Data || (profile && profile.newColorQ1Data) || newColorQ1Data || buildNewColorQ1DataFromFirstQR(profile && profile.newColorMgmtInfo);
+                const result = q2.newColorResult || newColorScanResult;
+                if (!q1Data || !result || !isNewColorStageComplete(result, q1Data.mgmtInfo)) return false;
+                newColorQ1Data = q1Data;
+                newColorScanResult = result;
+                isScanning = false;
+                isProcessing = false;
+                showNewColorResult(
+                    q1Data.text,
+                    result.qr2,
+                    result.qr3,
+                    result.qr4,
+                    q1Data.mgmtInfo,
+                    { ...q1Data, newColorResult: result }
+                );
+                return true;
+            }
             if (kind === 'appenc' && q2.encryptedDataBytes) {
                 savedQ2AppEncData = q2;
                 isProcessing = false;
@@ -2596,6 +2846,58 @@
             const vh = video.videoHeight;
 
             let sawRaw = false, sawOther = false;
+            const debugQ1Rect = (profile && profile.firstQrPoints) ? rectFromPoints(profile.firstQrPoints) : null;
+            const debugExpectedQ2Box = (target === 'Q2' && profile && profile.firstQrPoints)
+                ? estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber)
+                : null;
+            const debugExpectedQ2Rect = debugExpectedQ2Box && debugExpectedQ2Box.expectedQ2Rect
+                ? debugExpectedQ2Box.expectedQ2Rect
+                : null;
+            const normalizeProbeCropRect = (r) => {
+                if (!r) return null;
+                return {
+                    sx: Number(r.sx ?? r.x ?? 0),
+                    sy: Number(r.sy ?? r.y ?? 0),
+                    sw: Number(r.sw ?? r.width ?? 0),
+                    sh: Number(r.sh ?? r.height ?? 0)
+                };
+            };
+            let newColorAttemptedThisRun = false;
+            const tryDecodeNewColor = (phaseLabel, imageType = 'full') => {
+                if (target !== 'Q2' || !profile || profile.kind !== 'newcolor') return null;
+                if (newColorAttemptedThisRun) return null;
+                newColorAttemptedThisRun = true;
+                const q1Data = profile.newColorQ1Data || newColorQ1Data || buildNewColorQ1DataFromFirstQR(profile.newColorMgmtInfo);
+                const mgmt = q1Data && q1Data.mgmtInfo;
+                if (!q1Data || !mgmt) return null;
+                if (!newColorScanResult) newColorScanResult = createNewColorScanResult();
+                profile.newColorQ1Data = q1Data;
+                profile.newColorResult = newColorScanResult;
+
+                recordJsQrInput(phaseLabel + ' newColor', imageType);
+                const t0 = nowPerf();
+                zxingCanvas.width = vw;
+                zxingCanvas.height = vh;
+                zxingCtx.drawImage(video, 0, 0, vw, vh);
+                const fullData = zxingCtx.getImageData(0, 0, vw, vh);
+                const decoded = processNewColorQRTwin(fullData, vw, vh, q1Data, newColorScanResult);
+                addPhaseElapsed(scanStage, phaseLabel + ' newColor', nowPerf() - t0, 'jsqr');
+
+                if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
+                newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
+                const foundCount = countNewColorStageResult(newColorScanResult, mgmt);
+                statusText.innerText = '3/4領域化QRツイン解析中... (' + foundCount + '/' + mgmt.regionCount + ')';
+                if (!isNewColorStageComplete(newColorScanResult, mgmt)) return null;
+
+                recordPrelocateReason('成功');
+                getScanDebugStats().prelocateWin = 'newColor profile / ' + phaseLabel;
+                recordJsQrSuccess(1);
+                return {
+                    kind: 'newcolor',
+                    newColorQ1Data: q1Data,
+                    newColorResult: newColorScanResult
+                };
+            };
 
             // 1件の result を Q2 として採用できるか判定。採用なら Q2 オブジェクト、不可なら null。
             const acceptResult = (res, mapPt, binName, scaleTag, rotTag, decLabel) => {
@@ -2628,6 +2930,7 @@
                                 formatInfo: res.formatInfo
                             },
                             codewords: res.correctedCodewords || res.codewords || null,
+                            location: res.location,
                             points: pts,
                             center: computeCenterFromPoints(pts)
                         };
@@ -2672,6 +2975,7 @@
                     codewords: res.codewords,
                     dataBytes: res.dataBytes,
                     versionNumber: res.versionNumber,
+                    location: res.location,
                     points: pts,
                     center: computeCenterFromPoints(pts)
                 };
@@ -2680,6 +2984,9 @@
             // RGBA を 二値化{native,Sauvola,Otsu} × optsList で復号し、最初に採用できた Q2 を返す。
             // mapPt(x,y): その画像座標を元動画座標へ写す関数。 scaleTag/rotTag: 当たった変種の記録用。
             const tryDecode = (rgba, w, h, mapPt, scaleTag, rotTag, phaseLabel, imageType = 'full', debugMeta = {}) => {
+                if (profile && profile.kind === 'newcolor') {
+                    return tryDecodeNewColor(phaseLabel, imageType);
+                }
                 const makeVariants = [
                     () => ({ name: 'native', d: rgba, pre: false })
                 ];
@@ -2698,16 +3005,34 @@
                             opts.expectedDimension = 17 + 4 * profile.firstQrVersionNumber;
                             opts.expectedDimensionTolerance = 4; // Q1 version の±1段階までを許容
                         }
+                        opts.debugProbe = true;
+                        opts.probeCollector = [];
+                        opts._probeMapPoint = mapPt;
+                        opts._probeCropRect = normalizeProbeCropRect(debugMeta.cropRect);
+                        opts._probeQ1Rect = debugQ1Rect;
+                        opts._probeExpectedQ2Rect = debugExpectedQ2Rect;
                         recordJsQrInput(phaseLabel, imageType);
                         const _tp = nowPerf();
                         let r = null;
                         try { r = jsQR(v.d, w, h, opts); }
                         catch (e) {
                             addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tp, 'jsqr');
+                            recordJsQrProbes(scanStage, phaseLabel, opts.probeCollector, {
+                                bin: v.name,
+                                scale: String(scaleTag),
+                                rot: String(rotTag),
+                                dec: dopt.sysEncDecode ? 'sysenc' : (dopt.appEncMask ? 'appmask' : 'plain')
+                            });
                             continue;
                         }
                         addPhaseElapsed(scanStage, phaseLabel, nowPerf() - _tp, 'jsqr');
                         const decLabel = dopt.sysEncDecode ? 'sysenc' : (dopt.appEncMask ? 'appmask' : 'plain');
+                        recordJsQrProbes(scanStage, phaseLabel, opts.probeCollector, {
+                            bin: v.name,
+                            scale: String(scaleTag),
+                            rot: String(rotTag),
+                            dec: decLabel
+                        });
                         if (r && !Array.isArray(r)) r = [r];
                         if (!r) continue;
                         for (const res of r) {
@@ -2817,7 +3142,7 @@
                 } catch (e) { /* ignore */ }
             }
 
-            // ② スケール多重（960,720）× 二値化 × optsList
+            // ② スケール多重（960,720）× 二値化 × optsList（960は回転保険も）
             const scales = Array.isArray(ladderOpts.fullScales) ? ladderOpts.fullScales : [960, 720];
             for (const maxDim of scales) {
                 const fullPhaseLabel = (maxDim >= Math.max(vw, vh))
@@ -2834,6 +3159,17 @@
                 const hit = tryDecode(data.data, tw, th, (x, y) => ({ x: x * inv, y: y * inv }), maxDim, 0, fullPhaseLabel, 'full',
                     { cropRect: { sx: 0, sy: 0, sw: vw, sh: vh } });
                 if (hit) return hit;
+
+                // 回転バリアント（960スケール時のみ：方向性ノイズ対策の保険）
+                if (maxDim === 960 && ladderOpts.rotateFull !== false) {
+                    const rot = rotateRGBA90(data.data, tw, th, 'cw');
+                    const hitR = tryDecode(rot.data, rot.width, rot.height, (rx, ry) => {
+                        const p = unrotatePoint90(rx, ry, tw, th, 'cw');
+                        return { x: p.x * inv, y: p.y * inv };
+                    }, maxDim, 90, fullPhaseLabel, 'full',
+                    { cropRect: { sx: 0, sy: 0, sw: vw, sh: vh } });
+                    if (hitR) return hitR;
+                }
             }
 
             if (target === 'Q2') {
@@ -3379,6 +3715,7 @@
             digitalSignStage3 = false;
             sysEncStage3 = false;
             appMask = null;
+            resetNewColorScanState();
             document.getElementById('headerText').innerText = 'QR Twin Reader';
             startCamera();
         });
@@ -3708,10 +4045,23 @@
                 appMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
             }
 
+            if (newColorQ1Data && isNewColorMgmtInfo(newColorQ1Data.mgmtInfo)) {
+                scanStage = 3;
+                newColorScanStage = 1;
+                if (!newColorScanResult) newColorScanResult = createNewColorScanResult();
+                if (firstQR) { preserveFirstQrGeometryForQ2(); ensureFirstCenter(firstQR); firstQR.points = null; }
+                statusText.innerText = "3/4領域化QRツインの第2QR以降を探索中...";
+                isScanning = true;
+                isProcessing = false;
+                lastDetectTime = Date.now();
+                requestAnimationFrame(scanLoop);
+                return;
+            }
+
             if (scanMode === 'new_color_enc') {
                 newColorScanStage = 1;
                 if (!newColorScanResult) {
-                    newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
+                    newColorScanResult = { qr2: null, qr3: null, qr4: null, qr2Codewords: null, qr3Codewords: null, qr4Codewords: null, attempts: 0, _q2Seed: null, _q4Seed: null };
                 }
                 statusText.innerText = "カラーQRツインの第2QR以降を探索中...";
                 isScanning = true;
@@ -4018,6 +4368,7 @@
                 renderResultText('resText2', secondQR ? secondQR.text : null);
             }
 
+            renderScanDebugStats();
             appendCurrentTrialToLog(); // ★ この試行の計測を蓄積ログへ追記（完了時1回）
             document.getElementById('resultScreen').style.display = 'flex';
         }
@@ -4134,7 +4485,7 @@
         function resetNewColorScanState() {
             newColorScanStage = 0;
             newColorQ1Data = null;
-            newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
+            newColorScanResult = createNewColorScanResult();
         }
 
         function resetColorScanResult() {
@@ -5766,6 +6117,9 @@
                 qr2: null,
                 qr3: null,
                 qr4: null,
+                qr2Codewords: null,
+                qr3Codewords: null,
+                qr4Codewords: null,
                 _q2Seed: existingResult && existingResult._q2Seed ? existingResult._q2Seed : null,
                 _q4Seed: existingResult && existingResult._q4Seed ? existingResult._q4Seed : null
             };
@@ -5809,7 +6163,10 @@
                         1,
                         q2DecodeOptions
                     );
-                    if (qr2Synth) result.qr2 = qr2Synth.data;
+                    if (qr2Synth) {
+                        result.qr2 = qr2Synth.data;
+                        result.qr2Codewords = qr2Synth.codewords || null;
+                    }
                 }
                 const hasQ3Seed = !!(result._q2Seed || (existingResult && existingResult._q2Seed));
                 if (hasQ3Seed && (!existingResult || !existingResult.qr3) && decoder.states && projectedBuffers[1]) {
@@ -5818,7 +6175,10 @@
                         2,
                         q3DecodeOptions
                     );
-                    if (qr3Synth) result.qr3 = qr3Synth.data;
+                    if (qr3Synth) {
+                        result.qr3 = qr3Synth.data;
+                        result.qr3Codewords = qr3Synth.codewords || null;
+                    }
                 }
                 const hasQ4Seed = !!(result._q4Seed || (existingResult && existingResult._q4Seed));
                 if (hasQ4Seed && q1Data.mgmtInfo.regionCount === 4 && (!existingResult || !existingResult.qr4) && decoder.states && projectedBuffers[2]) {
@@ -5827,7 +6187,10 @@
                         3,
                         q4DecodeOptions
                     );
-                    if (qr4Synth) result.qr4 = qr4Synth.data;
+                    if (qr4Synth) {
+                        result.qr4 = qr4Synth.data;
+                        result.qr4Codewords = qr4Synth.codewords || null;
+                    }
                 }
             }
 
@@ -5843,6 +6206,7 @@
                         const adjusted = offsetQrResult(qr, pairCrop.offsetX, pairCrop.offsetY);
                         if (matchesExpectedQrNumber(adjusted, 1) && !result.qr2) {
                             result.qr2 = adjusted.data;
+                            result.qr2Codewords = adjusted.codewords || null;
                             result._q2Seed = adjusted;
                         }
                     }
@@ -5856,6 +6220,7 @@
                         const adjusted = offsetQrResult(qr, pairCrop.offsetX, pairCrop.offsetY);
                         if (matchesExpectedQrNumber(adjusted, 3) && !result.qr4) {
                             result.qr4 = adjusted.data;
+                            result.qr4Codewords = adjusted.codewords || null;
                             result._q4Seed = adjusted;
                         }
                     }
@@ -5888,6 +6253,7 @@
                 const qr2 = decodeProjectedNewColorCrop(projectedBuffers[0], pairCrop, 1, expectedColorRect, null, q2DecodeOptions);
                 if (qr2) {
                     result.qr2 = qr2.data;
+                    result.qr2Codewords = qr2.codewords || null;
                     result._q2Seed = qr2;
                     const seedBounds = getQrLocationBBox(qr2.location);
                     if (seedBounds) {
@@ -5903,13 +6269,17 @@
 
             if (!result.qr3 && (!existingResult || !existingResult.qr3) && projectedBuffers[1]) {
                 const qr3 = decodeProjectedNewColorCrop(projectedBuffers[1], pairCrop, 2, expectedColorRect, null, q3DecodeOptions);
-                if (qr3) result.qr3 = qr3.data;
+                if (qr3) {
+                    result.qr3 = qr3.data;
+                    result.qr3Codewords = qr3.codewords || null;
+                }
             }
 
             if (q1Data.mgmtInfo.regionCount === 4 && !result.qr4 && (!existingResult || !existingResult.qr4) && projectedBuffers[2]) {
                 const qr4 = decodeProjectedNewColorCrop(projectedBuffers[2], pairCrop, 3, expectedColorRect, null, q4DecodeOptions);
                 if (qr4) {
                     result.qr4 = qr4.data;
+                    result.qr4Codewords = qr4.codewords || null;
                     result._q4Seed = qr4;
                 }
             }
@@ -5925,6 +6295,7 @@
                     const qr2 = decodeProjectedNewColorCrop(fullProjected[0], fullCrop, 1, null, fullExcludeRects, q2DecodeOptions);
                     if (qr2) {
                         result.qr2 = qr2.data;
+                        result.qr2Codewords = qr2.codewords || null;
                         result._q2Seed = qr2;
                     }
                 }
@@ -5937,12 +6308,16 @@
 
                 if (!result.qr3 && (!existingResult || !existingResult.qr3) && fullProjected[1]) {
                     const qr3 = decodeProjectedNewColorCrop(fullProjected[1], fullCrop, 2, fullExpectedRect, fullExcludeRects, q3DecodeOptions);
-                    if (qr3) result.qr3 = qr3.data;
+                    if (qr3) {
+                        result.qr3 = qr3.data;
+                        result.qr3Codewords = qr3.codewords || null;
+                    }
                 }
                 if (q1Data.mgmtInfo.regionCount === 4 && !result.qr4 && (!existingResult || !existingResult.qr4) && fullProjected[2]) {
                     const qr4 = decodeProjectedNewColorCrop(fullProjected[2], fullCrop, 3, fullExpectedRect, fullExcludeRects, q4DecodeOptions);
                     if (qr4) {
                         result.qr4 = qr4.data;
+                        result.qr4Codewords = qr4.codewords || null;
                         result._q4Seed = qr4;
                     }
                 }
@@ -6010,6 +6385,91 @@
             };
         }
 
+        function isNewColorMgmtInfo(mgmtInfo) {
+            return !!(mgmtInfo && (mgmtInfo.regionCount >= 3 || mgmtInfo.colorCountBits === 2 || mgmtInfo.colorCountBits === 3));
+        }
+
+        function normalizeNewColorMgmtInfo(mgmtInfo) {
+            if (!mgmtInfo) return null;
+            if (mgmtInfo.regionCount >= 3) return mgmtInfo;
+            let regionCount = 2;
+            if (mgmtInfo.colorCountBits === 2) regionCount = 3;
+            if (mgmtInfo.colorCountBits === 3) regionCount = 4;
+            return { ...mgmtInfo, regionCount };
+        }
+
+        function createNewColorScanResult() {
+            return {
+                qr2: null,
+                qr3: null,
+                qr4: null,
+                qr2Codewords: null,
+                qr3Codewords: null,
+                qr4Codewords: null,
+                attempts: 0,
+                _q2Seed: null,
+                _q4Seed: null
+            };
+        }
+
+        function mergeNewColorScanResult(target, decoded) {
+            if (!target || !decoded) return target;
+            if (!target.qr2 && decoded.qr2) {
+                target.qr2 = decoded.qr2;
+                target.qr2Codewords = decoded.qr2Codewords || null;
+            }
+            if (!target.qr3 && decoded.qr3) {
+                target.qr3 = decoded.qr3;
+                target.qr3Codewords = decoded.qr3Codewords || null;
+            }
+            if (!target.qr4 && decoded.qr4) {
+                target.qr4 = decoded.qr4;
+                target.qr4Codewords = decoded.qr4Codewords || null;
+            }
+            if (!target._q2Seed && decoded._q2Seed) target._q2Seed = decoded._q2Seed;
+            if (!target._q4Seed && decoded._q4Seed) target._q4Seed = decoded._q4Seed;
+            return target;
+        }
+
+        function locationFromPoints(points) {
+            if (!points || points.length !== 4) return null;
+            return {
+                topLeftCorner: points[0],
+                topRightCorner: points[1],
+                bottomRightCorner: points[2],
+                bottomLeftCorner: points[3]
+            };
+        }
+
+        function buildNewColorQ1DataFromFirstQR(mgmtInfo = null) {
+            if (!firstQR) return null;
+            const parsedMgmt = normalizeNewColorMgmtInfo(mgmtInfo)
+                || parseNewColorMgmt(firstQR.managementCode32 ?? firstQR.managementCode, firstQR.managementFlags16 || 0);
+            if (!parsedMgmt || !isNewColorMgmtInfo(parsedMgmt)) return null;
+            return {
+                text: firstQR.text,
+                data: firstQR.data || firstQR.text,
+                managementCode: firstQR.managementCode,
+                managementCode32: firstQR.managementCode32,
+                managementFlags16: firstQR.managementFlags16,
+                managementExt32: firstQR.managementExt32,
+                expiryExt32: firstQR.expiryExt32,
+                readerIdExt32: firstQR.readerIdExt32,
+                readLimitBits: firstQR.readLimitBits,
+                qrTwinUniqueId8: firstQR.qrTwinUniqueId8,
+                creationDateTimeExt32: firstQR.creationDateTimeExt32,
+                locationLatExt24: firstQR.locationLatExt24,
+                locationLonExt24: firstQR.locationLonExt24,
+                municipalityExt24: firstQR.municipalityExt24,
+                mgmtInfo: parsedMgmt,
+                codewords: firstQR.codewords,
+                dataBytes: firstQR.dataBytes,
+                location: firstQR.location || locationFromPoints(firstQR.points || firstQR.q2SeedPoints),
+                version: firstQR.version || firstQR.versionNumber,
+                versionNumber: firstQR.versionNumber || firstQR.version
+            };
+        }
+
         function newColorModeNeedsPassword(mgmtInfo) {
             return !!(mgmtInfo && (mgmtInfo.dataCompBits === 2 || mgmtInfo.dataCompBits === 3));
         }
@@ -6033,7 +6493,22 @@
             return null;
         }
 
-        function verifyNewColorSignature(signatureText, payloadText, q1Meta) {
+        function concatCodewordArraysForHash(codewordArrays) {
+            const arrays = (codewordArrays || [])
+                .filter(arr => arr && arr.length)
+                .map(arr => Array.from(arr, v => v & 0xFF));
+            if (!arrays.length) return null;
+            const total = arrays.reduce((sum, arr) => sum + arr.length, 0);
+            const joined = new Uint8Array(total);
+            let offset = 0;
+            for (const arr of arrays) {
+                joined.set(arr, offset);
+                offset += arr.length;
+            }
+            return joined;
+        }
+
+        function verifyNewColorSignature(signatureText, payloadText, q1Meta, signedCodewordArrays = null) {
             const hasImageDataId = !!(q1Meta && q1Meta.managementExt32);
             if (!signatureText) {
                 return { verified: false, senderName: '署名データなし', imageDataId: q1Meta && q1Meta.managementExt32 ? q1Meta.managementExt32 : 0, hasImageDataId };
@@ -6050,7 +6525,9 @@
                 const sigS = signBytes.slice(22, 42);
                 const pubKeyHex = ECDSA_PUBLIC_KEYS[keyId];
                 const senderName = ECDSA_SENDER_NAMES[keyId] || `ID:${keyId}`;
-                const verified = !!(pubKeyHex && ecdsaVerify(new TextEncoder().encode(payloadText || ''), sigR, sigS, pubKeyHex));
+                const rawCodewords = concatCodewordArraysForHash(signedCodewordArrays);
+                const verifyInput = rawCodewords || new TextEncoder().encode(payloadText || '');
+                const verified = !!(pubKeyHex && ecdsaVerify(verifyInput, sigR, sigS, pubKeyHex));
                 return {
                     verified,
                     senderName,
@@ -6102,6 +6579,12 @@
             let combinedLabel = '';
             let combinedText = '';
             let verifyInfo = null;
+            const qRegionMeta = (q1Meta && q1Meta.newColorResult) ? q1Meta.newColorResult : newColorScanResult;
+            const q1Codewords = q1Meta && q1Meta.codewords ? q1Meta.codewords : null;
+            const q2Codewords = qRegionMeta && qRegionMeta.qr2Codewords ? qRegionMeta.qr2Codewords : null;
+            const q3Codewords = qRegionMeta && qRegionMeta.qr3Codewords ? qRegionMeta.qr3Codewords : null;
+            const triSignatureCodewords = (q1Codewords && q2Codewords) ? [q1Codewords, q2Codewords] : null;
+            const quadSignatureCodewords = (q1Codewords && q2Codewords && q3Codewords) ? [q1Codewords, q2Codewords, q3Codewords] : null;
 
             card1.style.display = '';
             card2.style.display = '';
@@ -6133,14 +6616,14 @@
             } else if (dataComp === 3) {
                 if (regionCount === 3) {
                     card3.style.display = 'none';
-                    verifyInfo = verifyNewColorSignature(q3Text || '', (q1Text || '') + (q2Text || ''), q1Meta);
+                    verifyInfo = verifyNewColorSignature(q3Text || '', (q1Text || '') + (q2Text || ''), q1Meta, triSignatureCodewords);
                 } else {
                     combinedLabel = '第2QR+第3QR データ（結合）';
                     combinedText = (q2Text || '') + (q3Text || '');
                     card2.style.display = 'none';
                     card3.style.display = 'none';
                     card4.style.display = 'none';
-                    verifyInfo = verifyNewColorSignature(q4Text || '', (q1Text || '') + (q2Text || '') + (q3Text || ''), q1Meta);
+                    verifyInfo = verifyNewColorSignature(q4Text || '', (q1Text || '') + (q2Text || '') + (q3Text || ''), q1Meta, quadSignatureCodewords);
                 }
             }
 
@@ -6344,7 +6827,7 @@
                                         location: q1Found.location,
                                         version: q1Found.version
                                     };
-                                    newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
+                                    newColorScanResult = { qr2: null, qr3: null, qr4: null, qr2Codewords: null, qr3Codewords: null, qr4Codewords: null, attempts: 0, _q2Seed: null, _q4Seed: null };
                                     const rStr = mgmtInfo.regionCount === 4 ? '4領域化(8色)' : '3領域化(4色)';
                                     if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
 
@@ -6375,7 +6858,7 @@
                         } else if (newColorScanStage === 1 && newColorQ1Data) {
                             const mgmtInfo = newColorQ1Data.mgmtInfo;
                             if (!newColorScanResult) {
-                                newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
+                                newColorScanResult = { qr2: null, qr3: null, qr4: null, qr2Codewords: null, qr3Codewords: null, qr4Codewords: null, attempts: 0, _q2Seed: null, _q4Seed: null };
                             }
 
                             zxingCanvas.width = vw;
@@ -6385,9 +6868,18 @@
 
                             const decoded = processNewColorQRTwin(fullData, vw, vh, newColorQ1Data, newColorScanResult);
                             if (decoded) {
-                                if (!newColorScanResult.qr2 && decoded.qr2) newColorScanResult.qr2 = decoded.qr2;
-                                if (!newColorScanResult.qr3 && decoded.qr3) newColorScanResult.qr3 = decoded.qr3;
-                                if (!newColorScanResult.qr4 && decoded.qr4) newColorScanResult.qr4 = decoded.qr4;
+                                if (!newColorScanResult.qr2 && decoded.qr2) {
+                                    newColorScanResult.qr2 = decoded.qr2;
+                                    newColorScanResult.qr2Codewords = decoded.qr2Codewords || null;
+                                }
+                                if (!newColorScanResult.qr3 && decoded.qr3) {
+                                    newColorScanResult.qr3 = decoded.qr3;
+                                    newColorScanResult.qr3Codewords = decoded.qr3Codewords || null;
+                                }
+                                if (!newColorScanResult.qr4 && decoded.qr4) {
+                                    newColorScanResult.qr4 = decoded.qr4;
+                                    newColorScanResult.qr4Codewords = decoded.qr4Codewords || null;
+                                }
                                 if (!newColorScanResult._q2Seed && decoded._q2Seed) newColorScanResult._q2Seed = decoded._q2Seed;
                                 if (!newColorScanResult._q4Seed && decoded._q4Seed) newColorScanResult._q4Seed = decoded._q4Seed;
                             }
@@ -7486,6 +7978,7 @@
                                 locationLatExt24: item.locationLatExt24,
                                 locationLonExt24: item.locationLonExt24,
                                 municipalityExt24: item.municipalityExt24,
+                                location: item.location,
                                 points: resultPts,
                                 center: computeCenterFromPoints(resultPts), // ★ 第2QR識別用に中心座標を保持
                                 codewords: item.codewords,
@@ -7528,6 +8021,36 @@
                             if (!ensureReadCountAllowed(firstQR)) {
                                 isScanning = false; isProcessing = false;
                                 return;
+                            }
+
+                            if (scanMode === 'normal' && isNewColorMgmtInfo(mgmtInfo)) {
+                                const newMgmtInfo = normalizeNewColorMgmtInfo(mgmtInfo);
+                                newColorQ1Data = buildNewColorQ1DataFromFirstQR(newMgmtInfo);
+                                newColorScanResult = createNewColorScanResult();
+                                if (newColorModeNeedsPassword(newMgmtInfo) && !appMask) {
+                                    isProcessing = false;
+                                    showPasswordScreen(
+                                        firstQR.text,
+                                        '3/4領域化QRツインの復号用パスワードを入力してください'
+                                    );
+                                    return;
+                                }
+
+                                scanStage = 3;
+                                statusText.innerText = "3/4領域化QRツインの第2QR以降を探索中...";
+                                if (firstQR) { preserveFirstQrGeometryForQ2(); ensureFirstCenter(firstQR); firstQR.points = null; }
+                                recordImmediatePrelocate(true, false, 'new_color');
+                                const _q2ProfileNewColor = buildQ2ProfileForFirst(newMgmtInfo);
+                                _q2ProfileNewColor.newColorQ1Data = newColorQ1Data;
+                                _q2ProfileNewColor.newColorResult = newColorScanResult;
+                                const _q2PreNewColor = await runLadder('Q2', _q2ProfileNewColor);
+                                if (_q2PreNewColor) {
+                                    recordImmediatePrelocate(false, true, 'new_color');
+                                    await dispatchQ2Found(_q2ProfileNewColor, _q2PreNewColor, scanMode);
+                                    return;
+                                }
+                                recordImmediatePrelocate(false, false, 'new_color');
+                                continue;
                             }
 
                             // 同一データフラグ
@@ -7642,10 +8165,11 @@
                                         readLimitBits: item.readLimitBits,
                                         qrTwinUniqueId8: item.qrTwinUniqueId8,
                                         creationDateTimeExt32: item.creationDateTimeExt32,
-                                        locationLatExt24: item.locationLatExt24,
-                                        locationLonExt24: item.locationLonExt24,
-                                        municipalityExt24: item.municipalityExt24,
-                                        points: resultPts,
+                                locationLatExt24: item.locationLatExt24,
+                                locationLonExt24: item.locationLonExt24,
+                                municipalityExt24: item.municipalityExt24,
+                                location: item.location,
+                                points: resultPts,
                                         center: computeCenterFromPoints(resultPts),
                                         codewords: item.codewords,
                                         dataBytes: item.dataBytes,
