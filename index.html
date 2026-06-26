@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader66</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1353,6 +1353,7 @@
                     successCount: 0,
                     jsqrMs: 0,   // ★ P3: このフェーズの jsQR 復号に費やした累計ms
                     bdMs: 0,     // ★ P3: このフェーズの BarcodeDetector 検出に費やした累計ms
+                    bdZeroElapsedMs: [],
                     jsqrProbeTotal: 0,
                     jsqrProbeCounts: {},
                     jsqrProbeSamples: []
@@ -1365,6 +1366,11 @@
             const phaseStats = getPhaseDebugStats(stage, phase);
             phaseStats.barcodeDetectCalls += 1;
             phaseStats.barcodeDetections += Math.max(0, Number(count) || 0);
+            if (Number(stage) === 1 && (Number(count) || 0) === 0 && phase === '共通F1 BarcodeDetectorクロップ') {
+                const stats = getScanDebugStats();
+                const elapsed = stats.startedPerf != null ? (nowPerf() - stats.startedPerf) : null;
+                if (elapsed !== null) phaseStats.bdZeroElapsedMs.push(elapsed);
+            }
         }
 
         // ★ P3: フェーズ別の経過ms を加算（kind: 'jsqr' | 'bd'）
@@ -1819,6 +1825,9 @@
                         `    jsQR: crop ${p.cropJsQrCalls}回 / full ${p.fullJsQrCalls}回 / 成功 ${p.successCount}回\n` +
                         `    所要: jsQR ${Math.round(p.jsqrMs || 0)}ms / BD ${Math.round(p.bdMs || 0)}ms`
                     );
+                    if (Array.isArray(p.bdZeroElapsedMs) && p.bdZeroElapsedMs.length) {
+                        lines.push(`    Stage1 F1 BD検出0時刻: ${p.bdZeroElapsedMs.map(v => `${Math.round(v)}ms`).join(', ')}`);
+                    }
                     if (p.jsqrProbeTotal) {
                         const counts = Object.entries(p.jsqrProbeCounts || {})
                             .sort((a, b) => b[1] - a[1])
