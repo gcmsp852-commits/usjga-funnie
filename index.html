@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader55</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -343,6 +343,11 @@
             <div id="newColorCreationDateCard" class="qr-data-card" style="border-color: #81C784; display:none;">
                 <label style="color:#81C784;">QRツイン作成日時</label>
                 <div class="text" id="newColorCreationDateText">-</div>
+            </div>
+            <div class="qr-data-card" id="newColorScanStatsCard" style="border-color:#FF1744; margin-top:12px;">
+                <label style="color:#FF1744;">隱ｭ蜿悶ョ繝舌ャ繧ｰ諠・ｱ</label>
+                <div class="text" id="newColorScanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
+                <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; margin-top:8px;" onclick="copyScanDebugInfo()">繧ｳ繝斐・</button>
             </div>
             <button class="btn" style="background-color:#6A1B9A;" onclick="restartScan()">もう一度スキャン</button>
             <button class="btn secondary" onclick="goBack()">モード切替</button>
@@ -1929,8 +1934,8 @@
             return lines.join('\n');
         }
 
-        function renderScanDebugStats() {
-            const el = document.getElementById('scanStatsText');
+        function renderScanDebugStats(targetId = 'scanStatsText') {
+            const el = document.getElementById(targetId);
             if (el) el.innerText = formatScanDebugStats();
         }
 
@@ -6974,6 +6979,19 @@
             renderResultText('newColorRes4', q4Text || null, '(未読取)');
             renderResultText('newColorResCombined', combinedText || null);
             renderCreationDateCard('newColorCreationDateCard', 'newColorCreationDateText', creationDateExt32);
+
+            const newColorDebugResult = { qr2: q2Text, qr3: q3Text, qr4: q4Text };
+            markScanCompleted(isNewColorStageComplete(newColorDebugResult, mgmtInfo) ? 'completed' : 'incomplete');
+            twinReadStartedAt = 0;
+            const newColorDebugCard = document.getElementById('newColorScanStatsCard');
+            if (newColorDebugCard) {
+                const debugLabel = newColorDebugCard.querySelector('label');
+                const debugButton = newColorDebugCard.querySelector('button');
+                if (debugLabel) debugLabel.textContent = 'Scan Debug';
+                if (debugButton) debugButton.textContent = 'Copy';
+            }
+            renderScanDebugStats('newColorScanStatsText');
+            appendCurrentTrialToLog();
 
             document.getElementById('newColorResultScreen').style.display = 'flex';
         }
