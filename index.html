@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader89</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -6372,9 +6372,10 @@
             };
         }
 
-        function storeNewColorRegionDecode(result, regionNo, qr, source = '') {
+        function storeNewColorRegionDecode(result, regionNo, qr, source = '', mgmtInfo = null) {
             if (!result || !qr) return false;
             const key = 'qr' + regionNo;
+            const encryptedBeforePassword = isNewColorRegionEncrypted(mgmtInfo, regionNo) && !appMask;
             if (isRawNewColorAppEncCandidate(qr)) {
                 const raw = buildNewColorRawCandidate(qr, regionNo, source);
                 if (!raw) return false;
@@ -6384,6 +6385,7 @@
                 return true;
             }
             if (!qr.data || qr.isRaw) return false;
+            if (encryptedBeforePassword) return false;
             if (!result[key]) result[key] = qr.data;
             if (!result[key + 'Codewords']) result[key + 'Codewords'] = qr.codewords || null;
             if (regionNo === 2 && !result._q2Seed) result._q2Seed = qr;
@@ -6462,7 +6464,7 @@
                         regionProbeOptions(q2DecodeOptions, 2, 'synthetic', 'synthetic')
                     );
                     if (qr2Synth) {
-                        storeNewColorRegionDecode(result, 2, qr2Synth, 'synthetic');
+                        storeNewColorRegionDecode(result, 2, qr2Synth, 'synthetic', q1Data.mgmtInfo);
                     }
                 }
                 const hasQ3Seed = !!(result._q2Seed || (existingResult && existingResult._q2Seed));
@@ -6473,7 +6475,7 @@
                         regionProbeOptions(q3DecodeOptions, 3, 'synthetic', 'synthetic')
                     );
                     if (qr3Synth) {
-                        storeNewColorRegionDecode(result, 3, qr3Synth, 'synthetic');
+                        storeNewColorRegionDecode(result, 3, qr3Synth, 'synthetic', q1Data.mgmtInfo);
                     }
                 }
                 const hasQ4Seed = !!(result._q4Seed || (existingResult && existingResult._q4Seed));
@@ -6484,7 +6486,7 @@
                         regionProbeOptions(q4DecodeOptions, 4, 'synthetic', 'synthetic')
                     );
                     if (qr4Synth) {
-                        storeNewColorRegionDecode(result, 4, qr4Synth, 'synthetic');
+                        storeNewColorRegionDecode(result, 4, qr4Synth, 'synthetic', q1Data.mgmtInfo);
                     }
                 }
             }
@@ -6528,7 +6530,7 @@
                     for (const qr of pairResult.results) {
                         const adjusted = offsetQrResult(qr, pairCrop.offsetX, pairCrop.offsetY);
                         if ((isRawNewColorAppEncCandidate(adjusted) || matchesExpectedQrNumber(adjusted, 1)) && !result.qr2) {
-                            storeNewColorRegionDecode(result, 2, adjusted, 'pair');
+                            storeNewColorRegionDecode(result, 2, adjusted, 'pair', q1Data.mgmtInfo);
                         }
                     }
                 }
@@ -6540,7 +6542,7 @@
                     for (const qr of pairResult.results) {
                         const adjusted = offsetQrResult(qr, pairCrop.offsetX, pairCrop.offsetY);
                         if ((isRawNewColorAppEncCandidate(adjusted) || matchesExpectedQrNumber(adjusted, 3)) && !result.qr4) {
-                            storeNewColorRegionDecode(result, 4, adjusted, 'pair');
+                            storeNewColorRegionDecode(result, 4, adjusted, 'pair', q1Data.mgmtInfo);
                         }
                     }
                 }
@@ -6571,7 +6573,7 @@
             if (!result.qr2 && (!existingResult || !existingResult.qr2) && projectedBuffers[0]) {
                 const qr2 = decodeProjectedNewColorCrop(projectedBuffers[0], pairCrop, 1, expectedColorRect, null, regionProbeOptions(q2DecodeOptions, 2, 'projected-pair', 'projected'));
                 if (qr2) {
-                    storeNewColorRegionDecode(result, 2, qr2, 'projected-pair');
+                    storeNewColorRegionDecode(result, 2, qr2, 'projected-pair', q1Data.mgmtInfo);
                     const seedBounds = getQrLocationBBox(qr2.location);
                     if (seedBounds) {
                         expectedColorRect = normalizeBBox({
@@ -6587,14 +6589,14 @@
             if (!result.qr3 && (!existingResult || !existingResult.qr3) && projectedBuffers[1]) {
                 const qr3 = decodeProjectedNewColorCrop(projectedBuffers[1], pairCrop, 2, expectedColorRect, null, regionProbeOptions(q3DecodeOptions, 3, 'projected-pair', 'projected'));
                 if (qr3) {
-                    storeNewColorRegionDecode(result, 3, qr3, 'projected-pair');
+                    storeNewColorRegionDecode(result, 3, qr3, 'projected-pair', q1Data.mgmtInfo);
                 }
             }
 
             if (q1Data.mgmtInfo.regionCount === 4 && !result.qr4 && (!existingResult || !existingResult.qr4) && projectedBuffers[2]) {
                 const qr4 = decodeProjectedNewColorCrop(projectedBuffers[2], pairCrop, 3, expectedColorRect, null, regionProbeOptions(q4DecodeOptions, 4, 'projected-pair', 'projected'));
                 if (qr4) {
-                    storeNewColorRegionDecode(result, 4, qr4, 'projected-pair');
+                    storeNewColorRegionDecode(result, 4, qr4, 'projected-pair', q1Data.mgmtInfo);
                 }
             }
 
@@ -6614,7 +6616,7 @@
                         probeScale: width + 'x' + height
                     });
                     if (qr2) {
-                        storeNewColorRegionDecode(result, 2, qr2, 'projected-full');
+                        storeNewColorRegionDecode(result, 2, qr2, 'projected-full', q1Data.mgmtInfo);
                     }
                 }
 
@@ -6630,7 +6632,7 @@
                         probeScale: width + 'x' + height
                     });
                     if (qr3) {
-                        storeNewColorRegionDecode(result, 3, qr3, 'projected-full');
+                        storeNewColorRegionDecode(result, 3, qr3, 'projected-full', q1Data.mgmtInfo);
                     }
                 }
                 if (q1Data.mgmtInfo.regionCount === 4 && !hasRegion4 && fullProjected[2]) {
@@ -6639,7 +6641,7 @@
                         probeScale: width + 'x' + height
                     });
                     if (qr4) {
-                        storeNewColorRegionDecode(result, 4, qr4, 'projected-full');
+                        storeNewColorRegionDecode(result, 4, qr4, 'projected-full', q1Data.mgmtInfo);
                     }
                 }
             }
