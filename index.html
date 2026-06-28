@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader15</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2804,9 +2804,19 @@
             if (kind === 'newcolor') {
                 const q1Data = q2.newColorQ1Data || (profile && profile.newColorQ1Data) || newColorQ1Data || buildNewColorQ1DataFromFirstQR(profile && profile.newColorMgmtInfo);
                 const result = q2.newColorResult || newColorScanResult;
-                if (!q1Data || !result || !isNewColorStageComplete(result, q1Data.mgmtInfo)) return false;
+                if (!q1Data || !result) return false;
                 newColorQ1Data = q1Data;
                 newColorScanResult = result;
+                if (newColorModeNeedsPassword(q1Data.mgmtInfo) && !appMask) {
+                    if (!hasRequiredNewColorRawCandidates(result, q1Data.mgmtInfo)) return false;
+                    isProcessing = false;
+                    showPasswordScreen(
+                        q1Data.text,
+                        'Enter the password for 3/4-region QR Twin.'
+                    );
+                    return true;
+                }
+                if (!isNewColorStageComplete(result, q1Data.mgmtInfo)) return false;
                 isScanning = false;
                 isProcessing = false;
                 showNewColorResult(
@@ -2891,9 +2901,14 @@
 
                 if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
                 newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
+                const needsPasswordBeforeDecode = newColorModeNeedsPassword(mgmt) && !appMask;
                 const foundCount = countNewColorStageResult(newColorScanResult, mgmt);
                 statusText.innerText = '3/4領域化QRツイン解析中... (' + foundCount + '/' + mgmt.regionCount + ')';
-                if (!isNewColorStageComplete(newColorScanResult, mgmt)) return null;
+                if (needsPasswordBeforeDecode) {
+                    if (!hasRequiredNewColorRawCandidates(newColorScanResult, mgmt)) return null;
+                } else if (!isNewColorStageComplete(newColorScanResult, mgmt)) {
+                    return null;
+                }
 
                 recordPrelocateReason('成功');
                 getScanDebugStats().prelocateWin = 'newColor profile / ' + phaseLabel;
@@ -3877,7 +3892,7 @@
             addPhaseElapsed(scanStage || 1, phaseLabel, nowPerf() - t0, 'jsqr');
             if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
             newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
-            return !!(newColorScanResult.qr2Raw || newColorScanResult.qr3Raw || newColorScanResult.qr4Raw);
+            return hasRequiredNewColorRawCandidates(newColorScanResult, newColorQ1Data.mgmtInfo);
         }
 
         async function finishNewColorAfterPassword() {
@@ -3919,6 +3934,18 @@
                 addPhaseElapsed(scanStage || 3, phaseLabel, nowPerf() - t0, 'jsqr');
                 if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
                 newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
+            }
+
+            if (!isNewColorStageComplete(newColorScanResult, newColorQ1Data.mgmtInfo)) {
+                pendingNewColorFrame = null;
+                scanStage = 3;
+                newColorScanStage = 1;
+                isScanning = true;
+                isProcessing = false;
+                lastDetectTime = 0;
+                statusText.innerText = "3/4鬆伜沺蛹鵬R繝・う繝ｳ縺ｮ譛ｪ蜿門ｾ玲・沺繧呈爾邏｢荳ｭ...";
+                requestAnimationFrame(scanLoop);
+                return false;
             }
 
             isScanning = false;
@@ -6815,6 +6842,29 @@
             return false;
         }
 
+        function getNewColorEncryptedRegionNos(mgmtInfo) {
+            const out = [];
+            if (!mgmtInfo) return out;
+            for (let regionNo = 2; regionNo <= mgmtInfo.regionCount; regionNo++) {
+                if (isNewColorRegionEncrypted(mgmtInfo, regionNo)) out.push(regionNo);
+            }
+            return out;
+        }
+
+        function hasRequiredNewColorRawCandidates(result, mgmtInfo) {
+            const encryptedRegions = getNewColorEncryptedRegionNos(mgmtInfo);
+            if (!encryptedRegions.length) return false;
+            if (!result) return false;
+            return encryptedRegions.every(regionNo => !!result['qr' + regionNo + 'Raw']);
+        }
+
+        function hasRequiredNewColorDecodedRegions(result, mgmtInfo) {
+            const encryptedRegions = getNewColorEncryptedRegionNos(mgmtInfo);
+            if (!encryptedRegions.length) return false;
+            if (!result) return false;
+            return encryptedRegions.every(regionNo => !!result['qr' + regionNo]);
+        }
+
         function getNewColorRegionDecodeOptions(mgmtInfo, regionNo) {
             if (isNewColorRegionEncrypted(mgmtInfo, regionNo)) {
                 if (appMask) {
@@ -7182,13 +7232,15 @@
 
                                     if (newColorModeNeedsPassword(mgmtInfo) && !appMask) {
                                         newColorScanStage = 0;
-                                        captureAndPredecodeNewColorRawCandidates();
+                                        const rawReady = captureAndPredecodeNewColorRawCandidates();
+                                        if (rawReady) {
                                         isProcessing = false;
                                         showPasswordScreen(
                                             q1Found.data,
                                             '第1QRを読取済み。新カラー復号用のパスワード入力待ちです。'
                                         );
                                         return;
+                                    }
                                     }
 
                                     newColorScanStage = 1;
@@ -7219,6 +7271,15 @@
                             const decoded = processNewColorQRTwin(fullData, vw, vh, newColorQ1Data, newColorScanResult);
                             if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
                             newColorScanResult.attempts++;
+
+                            if (newColorModeNeedsPassword(mgmtInfo) && !appMask && hasRequiredNewColorRawCandidates(newColorScanResult, mgmtInfo)) {
+                                isProcessing = false;
+                                showPasswordScreen(
+                                    newColorQ1Data.text,
+                                    '3/4鬆伜沺蛹鵬R繝・う繝ｳ縺ｮ蠕ｩ蜿ｷ逕ｨ繝代せ繝ｯ繝ｼ繝峨ｒ蜈･蜉帙＠縺ｦ縺上□縺輔＞'
+                                );
+                                return;
+                            }
 
                             if (isNewColorStageComplete(newColorScanResult, mgmtInfo)) {
                                 statusText.innerText = '新カラーQRツイン読取完了。結果を表示します...';
@@ -8363,13 +8424,15 @@
                                 newColorQ1Data = buildNewColorQ1DataFromFirstQR(newMgmtInfo);
                                 newColorScanResult = createNewColorScanResult();
                                 if (newColorModeNeedsPassword(newMgmtInfo) && !appMask) {
-                                    captureAndPredecodeNewColorRawCandidates();
+                                    const rawReady = captureAndPredecodeNewColorRawCandidates();
+                                    if (rawReady) {
                                     isProcessing = false;
                                     showPasswordScreen(
                                         firstQR.text,
                                         '3/4領域化QRツインの復号用パスワードを入力してください'
                                     );
-                                    return;
+                                        return;
+                                    }
                                 }
 
                                 scanStage = 3;
