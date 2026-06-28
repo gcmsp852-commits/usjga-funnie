@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader78</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -3890,13 +3890,14 @@
                 const raw = newColorScanResult[key + 'Raw'];
                 if (!raw || typeof jsQR.resumeDecode !== 'function') return false;
                 const decoded = jsQR.resumeDecode(raw.rawMatrixData || raw, mask);
-                if (!decoded || !decoded.data) return false;
+                const decodedText = decoded && (decoded.text || decoded.data);
+                if (!decodedText) return false;
                 const mgmtCode32 = decoded.managementCode32 !== undefined && decoded.managementCode32 !== null
                     ? (decoded.managementCode32 >>> 0)
                     : getManagementCode32FromParts(decoded.managementCode, decoded.managementFlags16);
                 const mgmtInfo = parseStandardMgmt(mgmtCode32);
                 if (mgmtInfo && mgmtInfo.qrNo !== regionNo - 1) return false;
-                newColorScanResult[key] = decoded.data;
+                newColorScanResult[key] = decodedText;
                 newColorScanResult[key + 'Codewords'] = raw.codewords || raw.correctedCodewords || null;
                 if (regionNo === 2 && !newColorScanResult._q2Seed) newColorScanResult._q2Seed = raw;
                 if (regionNo === 4 && !newColorScanResult._q4Seed) newColorScanResult._q4Seed = raw;
