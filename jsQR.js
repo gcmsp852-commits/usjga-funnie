@@ -585,6 +585,7 @@ function scan(matrix, options) {
                     moduleMatrix: extracted.matrix,
                     isRaw: decoded.isRaw,
                     codewords: decoded.codewords,
+                    correctedCodewords: decoded.correctedCodewords || decoded.codewords,
                     dataBytes: decoded.dataBytes,
                     formatInfo: decoded.formatInfo,
                     rawMatrixData: decoded.rawMatrixData,

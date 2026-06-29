@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader37</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -3913,7 +3913,7 @@
                 const mgmtInfo = parseStandardMgmt(mgmtCode32);
                 if (mgmtInfo && mgmtInfo.qrNo !== regionNo - 1) return false;
                 newColorScanResult[key] = decodedText;
-                newColorScanResult[key + 'Codewords'] = raw.codewords || raw.correctedCodewords || null;
+                newColorScanResult[key + 'Codewords'] = raw.correctedCodewords || raw.codewords || null;
                 if (regionNo === 2 && !newColorScanResult._q2Seed) newColorScanResult._q2Seed = raw;
                 if (regionNo === 4 && !newColorScanResult._q4Seed) newColorScanResult._q4Seed = raw;
                 return true;
@@ -6384,7 +6384,7 @@
                 encryptedDataBytes,
                 dataBytes: encryptedDataBytes,
                 correctedCodewords: qr.correctedCodewords || qr.codewords || null,
-                codewords: qr.correctedCodewords || qr.codewords || null,
+                codewords: qr.codewords || qr.correctedCodewords || null,
                 version: qr.version,
                 versionNumber: qr.versionNumber || (qr.version && qr.version.versionNumber),
                 formatInfo: qr.formatInfo,
@@ -6909,8 +6909,8 @@
         function getNewColorSignatureCodewordsForRegion(qRegionMeta, regionNo) {
             if (!qRegionMeta) return null;
             const raw = qRegionMeta['qr' + regionNo + 'Raw'];
-            if (raw && raw.codewords && raw.codewords.length) return raw.codewords;
             if (raw && raw.correctedCodewords && raw.correctedCodewords.length) return raw.correctedCodewords;
+            if (raw && raw.codewords && raw.codewords.length) return raw.codewords;
             return qRegionMeta['qr' + regionNo + 'Codewords'] || null;
         }
 
