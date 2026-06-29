@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader78</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -979,8 +979,6 @@
         const COLOR_DETECT_REFRESH_EVERY = 2;
         const COLOR_BBOX_PADDING = 64;
         const NEW_COLOR_SHIFT_MODULES = 8.5;
-        const NEW_COLOR_SYNTH_MODULE_PX = 8;
-        const NEW_COLOR_SYNTH_QUIET = 4;
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -6337,54 +6335,39 @@
             return bits;
         }
 
-        function buildSyntheticQrBinary(bitsMatrix, modulePx = NEW_COLOR_SYNTH_MODULE_PX, quiet = NEW_COLOR_SYNTH_QUIET) {
+        function decodeNewColorBitMatrixQr(bitsMatrix, expectedQrNo, jsQrOptions = null) {
+            if (!bitsMatrix || !bitsMatrix.length || !window.jsQR || typeof jsQR.decodeMatrix !== 'function') return null;
+            const phaseBase = (jsQrOptions && jsQrOptions.probePhase) || ('newColor matrix Q' + (expectedQrNo + 1));
+            const phase = phaseBase + ' direct';
             const n = bitsMatrix.length;
-            const size = (n + quiet * 2) * modulePx;
-            const data = new Uint8ClampedArray(size * size);
-            data.fill(255);
-
-            for (let r = 0; r < n; r++) {
-                for (let c = 0; c < n; c++) {
-                    if (!bitsMatrix[r][c]) continue;
-                    const startY = (r + quiet) * modulePx;
-                    const startX = (c + quiet) * modulePx;
-                    for (let y = 0; y < modulePx; y++) {
-                        const rowOffset = (startY + y) * size;
-                        for (let x = 0; x < modulePx; x++) {
-                            data[rowOffset + startX + x] = 0;
-                        }
-                    }
-                }
-            }
-
-            return { data, width: size, height: size };
-        }
-
-        function decodeSyntheticNewColorQr(bitsMatrix, expectedQrNo, jsQrOptions = null) {
-            const synthetic = buildSyntheticQrBinary(bitsMatrix);
-            for (const inversionAttempts of ['dontInvert', 'attemptBoth']) {
-                const phase = (jsQrOptions && jsQrOptions.probePhase) || ('newColor synthetic Q' + (expectedQrNo + 1));
-                const qr = runNewColorJsQrWithProbe(synthetic.data, synthetic.width, synthetic.height, {
-                    preBinarized: true,
-                    inversionAttempts,
-                    singleLocate: true,
-                    ...(jsQrOptions || {})
-                }, phase, 'synthetic', {
-                    scanPass: jsQrOptions || {},
-                    bin: 'synthetic',
-                    scale: 'modulePx' + NEW_COLOR_SYNTH_MODULE_PX,
+            const probeOpts = {
+                ...(jsQrOptions || {}),
+                preBinarized: true,
+                debugProbe: true,
+                probeCollector: []
+            };
+            recordJsQrInput(phase, 'matrix');
+            const t0 = nowPerf();
+            let qr = null;
+            try {
+                qr = jsQR.decodeMatrix(bitsMatrix, probeOpts);
+            } catch (e) {
+                qr = null;
+            } finally {
+                addPhaseElapsed(scanStage, phase, nowPerf() - t0, 'jsqr');
+                recordJsQrProbes(scanStage, phase, probeOpts.probeCollector, getNewColorProbeMeta(jsQrOptions || {}, {
+                    bin: 'matrix',
+                    scale: n + 'x' + n,
                     rot: '0',
-                    dec: jsQrOptions && jsQrOptions.appEncMask ? 'appmask' : (jsQrOptions && jsQrOptions.sysEncDecode ? 'sysenc' : 'plain'),
-                    q1Rect: jsQrOptions && jsQrOptions.probeQ1Rect,
-                    expectedQ2Rect: jsQrOptions && jsQrOptions.probeExpectedQ2Rect
-                });
-                const rawOk = !!(qr && qr.isRaw && qr.dataBytes && qr.dataBytes.length && jsQrOptions && jsQrOptions.captureAppEncDataBytes);
-                if (!qr || (!rawOk && (!qr.data || qr.isRaw))) continue;
-                if (rawOk) qr._newColorRawQrNo = expectedQrNo;
-                if (rawOk || expectedQrNo === undefined || expectedQrNo === null || matchesExpectedQrNumber(qr, expectedQrNo)) {
-                    recordAcceptedNewColorQr(qr);
-                    return qr;
-                }
+                    dec: jsQrOptions && jsQrOptions.appEncMask ? 'appmask' : (jsQrOptions && jsQrOptions.sysEncDecode ? 'sysenc' : 'plain')
+                }));
+            }
+            const rawOk = !!(qr && qr.isRaw && qr.dataBytes && qr.dataBytes.length && jsQrOptions && jsQrOptions.captureAppEncDataBytes);
+            if (!qr || (!rawOk && (!qr.data || qr.isRaw))) return null;
+            if (rawOk) qr._newColorRawQrNo = expectedQrNo;
+            if (rawOk || expectedQrNo === undefined || expectedQrNo === null || matchesExpectedQrNumber(qr, expectedQrNo)) {
+                recordAcceptedNewColorQr(qr);
+                return qr;
             }
             return null;
         }
@@ -6504,35 +6487,35 @@
             const sampledStates = sampleNewColorDisplayStates(imageData.data, width, height, q1Data, decoder);
             if (sampledStates) {
                 if ((!existingResult || !existingResult.qr2) && decoder.states && projectedBuffers[0]) {
-                    const qr2Synth = decodeSyntheticNewColorQr(
+                    const qr2Matrix = decodeNewColorBitMatrixQr(
                         buildBitMatrixFromColorStates(sampledStates, decoder.states, 0),
                         1,
-                        regionProbeOptions(q2DecodeOptions, 2, 'synthetic', 'synthetic')
+                        regionProbeOptions(q2DecodeOptions, 2, 'matrix', 'matrix')
                     );
-                    if (qr2Synth) {
-                        storeNewColorRegionDecode(result, 2, qr2Synth, 'synthetic', q1Data.mgmtInfo);
+                    if (qr2Matrix) {
+                        storeNewColorRegionDecode(result, 2, qr2Matrix, 'matrix', q1Data.mgmtInfo);
                     }
                 }
                 const hasQ3Seed = !!(result._q2Seed || (existingResult && existingResult._q2Seed));
                 if (hasQ3Seed && (!existingResult || !existingResult.qr3) && decoder.states && projectedBuffers[1]) {
-                    const qr3Synth = decodeSyntheticNewColorQr(
+                    const qr3Matrix = decodeNewColorBitMatrixQr(
                         buildBitMatrixFromColorStates(sampledStates, decoder.states, 1),
                         2,
-                        regionProbeOptions(q3DecodeOptions, 3, 'synthetic', 'synthetic')
+                        regionProbeOptions(q3DecodeOptions, 3, 'matrix', 'matrix')
                     );
-                    if (qr3Synth) {
-                        storeNewColorRegionDecode(result, 3, qr3Synth, 'synthetic', q1Data.mgmtInfo);
+                    if (qr3Matrix) {
+                        storeNewColorRegionDecode(result, 3, qr3Matrix, 'matrix', q1Data.mgmtInfo);
                     }
                 }
                 const hasQ4Seed = !!(result._q4Seed || (existingResult && existingResult._q4Seed));
                 if (hasQ4Seed && q1Data.mgmtInfo.regionCount === 4 && (!existingResult || !existingResult.qr4) && decoder.states && projectedBuffers[2]) {
-                    const qr4Synth = decodeSyntheticNewColorQr(
+                    const qr4Matrix = decodeNewColorBitMatrixQr(
                         buildBitMatrixFromColorStates(sampledStates, decoder.states, 2),
                         3,
-                        regionProbeOptions(q4DecodeOptions, 4, 'synthetic', 'synthetic')
+                        regionProbeOptions(q4DecodeOptions, 4, 'matrix', 'matrix')
                     );
-                    if (qr4Synth) {
-                        storeNewColorRegionDecode(result, 4, qr4Synth, 'synthetic', q1Data.mgmtInfo);
+                    if (qr4Matrix) {
+                        storeNewColorRegionDecode(result, 4, qr4Matrix, 'matrix', q1Data.mgmtInfo);
                     }
                 }
             }

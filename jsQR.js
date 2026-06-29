@@ -670,6 +670,76 @@ function jsQR(data, width, height, providedOptions) {
     return result;
 }
 jsQR.default = jsQR;
+function buildModuleBitMatrix(moduleMatrix) {
+    if (!moduleMatrix) {
+        return null;
+    }
+    if (moduleMatrix.width && moduleMatrix.height && typeof moduleMatrix.get === "function") {
+        return moduleMatrix;
+    }
+    var height = moduleMatrix.length;
+    var width = height && moduleMatrix[0] ? moduleMatrix[0].length : 0;
+    if (!height || !width || width !== height) {
+        return null;
+    }
+    var matrix = BitMatrix_1.BitMatrix.createEmpty(width, height);
+    for (var y = 0; y < height; y++) {
+        if (!moduleMatrix[y] || moduleMatrix[y].length !== width) {
+            return null;
+        }
+        for (var x = 0; x < width; x++) {
+            matrix.set(x, y, !!moduleMatrix[y][x]);
+        }
+    }
+    return matrix;
+}
+function buildDirectDecodeResult(decoded, matrix) {
+    if (!decoded) {
+        return null;
+    }
+    return {
+        binaryData: decoded.bytes,
+        data: decoded.text,
+        chunks: decoded.chunks,
+        version: decoded.version,
+        managementCode: decoded.managementCode,
+        managementCode32: decoded.managementCode32,
+        managementFlags16: decoded.managementFlags16,
+        creationDateTimeExt32: decoded.creationDateTimeExt32,
+        managementExt32: decoded.managementExt32,
+        expiryExt32: decoded.expiryExt32,
+        readerIdExt32: decoded.readerIdExt32,
+        readLimitBits: decoded.readLimitBits,
+        qrTwinUniqueId8: decoded.qrTwinUniqueId8,
+        locationLatExt24: decoded.locationLatExt24,
+        locationLonExt24: decoded.locationLonExt24,
+        municipalityExt24: decoded.municipalityExt24,
+        location: null,
+        matrix: matrix,
+        moduleMatrix: matrix,
+        isRaw: decoded.isRaw,
+        codewords: decoded.codewords,
+        correctedCodewords: decoded.correctedCodewords || decoded.codewords,
+        dataBytes: decoded.dataBytes,
+        formatInfo: decoded.formatInfo,
+        rawMatrixData: decoded.rawMatrixData,
+        versionNumber: decoded.versionNumber,
+        appEncDataBytesEncrypted: decoded.appEncDataBytesEncrypted
+    };
+}
+jsQR.decodeMatrix = function (moduleMatrix, providedOptions) {
+    if (providedOptions === void 0) { providedOptions = {}; }
+    var matrix = buildModuleBitMatrix(moduleMatrix);
+    if (!matrix) {
+        return null;
+    }
+    var options = __assign({}, providedOptions);
+    options.preBinarized = true;
+    if (options._probeLocationDimension === undefined) {
+        options._probeLocationDimension = matrix.width;
+    }
+    return buildDirectDecodeResult(decoder_1.decode(matrix, options), matrix);
+};
 jsQR.resumeDecode = function (rawData, appMask) {
     if (!rawData)
         return null;
