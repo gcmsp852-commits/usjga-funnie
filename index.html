@@ -81,6 +81,23 @@
         #resultScreen { justify-content: flex-start; overflow-y: auto; }
         #resultScreen .overlay-box { max-height: calc(100dvh - 40px); overflow-y: auto; max-width: 520px; }
         #scanStatsText { max-height: 34dvh; overflow-y: auto; overflow-x: auto; font-size: 0.82rem; line-height: 1.35; word-break: normal; white-space: pre; }
+        #newColorScanStatsText {
+            height: 12rem;
+            max-height: 34dvh;
+            overflow-y: auto;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
+            font-size: 0.82rem;
+            line-height: 1.35;
+            word-break: normal;
+            white-space: pre-wrap;
+        }
+        #newColorResultActions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
         
         .enc-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; }
         .enc-badge.sys { background: rgba(255,111,0,0.2); color: #FF6F00; border: 1px solid rgba(255,111,0,0.4); }
@@ -89,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader52</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -344,13 +361,15 @@
                 <label style="color:#81C784;">QRツイン作成日時</label>
                 <div class="text" id="newColorCreationDateText">-</div>
             </div>
+            <div id="newColorResultActions">
+                <button class="btn" style="background-color:#6A1B9A;" onclick="restartScan()">もう一度スキャン</button>
+                <button class="btn secondary" onclick="goBack()">モード切替</button>
+            </div>
             <div class="qr-data-card" id="newColorScanStatsCard" style="border-color:#FF1744; margin-top:12px;">
                 <label style="color:#FF1744;">隱ｭ蜿悶ョ繝舌ャ繧ｰ諠・ｱ</label>
                 <div class="text" id="newColorScanStatsText" style="text-align:left; white-space:pre-wrap;">-</div>
                 <button class="btn secondary" style="font-size:0.85rem; padding:8px 12px; margin-top:8px;" onclick="copyScanDebugInfo()">繧ｳ繝斐・</button>
             </div>
-            <button class="btn" style="background-color:#6A1B9A;" onclick="restartScan()">もう一度スキャン</button>
-            <button class="btn secondary" onclick="goBack()">モード切替</button>
         </div>
     </div>
 
