@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader41</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -2808,7 +2808,7 @@
                 newColorQ1Data = q1Data;
                 newColorScanResult = result;
                 if (newColorModeNeedsPassword(q1Data.mgmtInfo) && !appMask) {
-                    if (!hasRequiredNewColorRawCandidates(result, q1Data.mgmtInfo)) return false;
+                    if (!hasRequiredNewColorPasswordCandidates(result, q1Data.mgmtInfo)) return false;
                     isProcessing = false;
                     showPasswordScreen(
                         q1Data.text,
@@ -2905,7 +2905,7 @@
                 const foundCount = countNewColorStageResult(newColorScanResult, mgmt);
                 statusText.innerText = '3/4領域化QRツイン解析中... (' + foundCount + '/' + mgmt.regionCount + ')';
                 if (needsPasswordBeforeDecode) {
-                    if (!hasRequiredNewColorRawCandidates(newColorScanResult, mgmt)) return null;
+                    if (!hasRequiredNewColorPasswordCandidates(newColorScanResult, mgmt)) return null;
                 } else if (!isNewColorStageComplete(newColorScanResult, mgmt)) {
                     return null;
                 }
@@ -3892,7 +3892,7 @@
             addPhaseElapsed(scanStage || 1, phaseLabel, nowPerf() - t0, 'jsqr');
             if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
             newColorScanResult.attempts = (newColorScanResult.attempts || 0) + 1;
-            return hasRequiredNewColorRawCandidates(newColorScanResult, newColorQ1Data.mgmtInfo);
+            return hasRequiredNewColorPasswordCandidates(newColorScanResult, newColorQ1Data.mgmtInfo);
         }
 
         async function finishNewColorAfterPassword() {
@@ -6858,6 +6858,18 @@
             return encryptedRegions.every(regionNo => !!result['qr' + regionNo + 'Raw']);
         }
 
+        function getNewColorSignatureRegionNo(mgmtInfo) {
+            if (!mgmtInfo || mgmtInfo.dataCompBits !== 3) return null;
+            return mgmtInfo.regionCount === 4 ? 4 : 3;
+        }
+
+        function hasRequiredNewColorPasswordCandidates(result, mgmtInfo) {
+            if (!hasRequiredNewColorRawCandidates(result, mgmtInfo)) return false;
+            const signatureRegionNo = getNewColorSignatureRegionNo(mgmtInfo);
+            if (!signatureRegionNo) return true;
+            return !!(result && result['qr' + signatureRegionNo]);
+        }
+
         function hasRequiredNewColorDecodedRegions(result, mgmtInfo) {
             const encryptedRegions = getNewColorEncryptedRegionNos(mgmtInfo);
             if (!encryptedRegions.length) return false;
@@ -6892,6 +6904,14 @@
                 offset += arr.length;
             }
             return joined;
+        }
+
+        function getNewColorSignatureCodewordsForRegion(qRegionMeta, regionNo) {
+            if (!qRegionMeta) return null;
+            const raw = qRegionMeta['qr' + regionNo + 'Raw'];
+            if (raw && raw.codewords && raw.codewords.length) return raw.codewords;
+            if (raw && raw.correctedCodewords && raw.correctedCodewords.length) return raw.correctedCodewords;
+            return qRegionMeta['qr' + regionNo + 'Codewords'] || null;
         }
 
         function verifyNewColorSignature(signatureText, payloadText, q1Meta, signedCodewordArrays = null) {
@@ -6967,8 +6987,8 @@
             let verifyInfo = null;
             const qRegionMeta = (q1Meta && q1Meta.newColorResult) ? q1Meta.newColorResult : newColorScanResult;
             const q1Codewords = q1Meta && q1Meta.codewords ? q1Meta.codewords : null;
-            const q2Codewords = qRegionMeta && qRegionMeta.qr2Codewords ? qRegionMeta.qr2Codewords : null;
-            const q3Codewords = qRegionMeta && qRegionMeta.qr3Codewords ? qRegionMeta.qr3Codewords : null;
+            const q2Codewords = getNewColorSignatureCodewordsForRegion(qRegionMeta, 2);
+            const q3Codewords = getNewColorSignatureCodewordsForRegion(qRegionMeta, 3);
             const triSignatureCodewords = (q1Codewords && q2Codewords) ? [q1Codewords, q2Codewords] : null;
             const quadSignatureCodewords = (q1Codewords && q2Codewords && q3Codewords) ? [q1Codewords, q2Codewords, q3Codewords] : null;
 
@@ -7269,7 +7289,7 @@
                             if (decoded) mergeNewColorScanResult(newColorScanResult, decoded);
                             newColorScanResult.attempts++;
 
-                            if (newColorModeNeedsPassword(mgmtInfo) && !appMask && hasRequiredNewColorRawCandidates(newColorScanResult, mgmtInfo)) {
+                            if (newColorModeNeedsPassword(mgmtInfo) && !appMask && hasRequiredNewColorPasswordCandidates(newColorScanResult, mgmtInfo)) {
                                 isProcessing = false;
                                 showPasswordScreen(
                                     newColorQ1Data.text,
