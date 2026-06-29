@@ -89,7 +89,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader22</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -7055,10 +7055,7 @@
 
             // ★ 10秒タイムアウト判定（読取開始からの経過）。中間画面中は isScanning=false なので進まない。
             if (!twinReadStartedAt) twinReadStartedAt = nowPerf();
-            if (nowPerf() - twinReadStartedAt >= SCAN_TIMEOUT_MS) {
-                handleScanTimeout();
-                return;
-            }
+            // Scan timeout is disabled. Continue scanning until a QR Twin is completed or the user stops scanning.
 
             if (video.videoWidth && overlayCanvas.width !== video.videoWidth) {
                 overlayCanvas.width = video.videoWidth;
