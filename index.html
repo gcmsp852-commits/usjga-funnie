@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader67</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -6284,123 +6284,6 @@
             return specs;
         }
 
-        function buildNewColorProjectionBuffers(src, pixelCount, decoder) {
-            if (!decoder || !decoder.states) return [];
-
-            const bitCount = Math.max(
-                0,
-                ...Object.values(decoder.states).map(bits => Array.isArray(bits) ? bits.length : 0)
-            );
-            if (bitCount <= 0) return [];
-
-            const projected = Array.from({ length: bitCount }, () => {
-                const out = new Uint8ClampedArray(pixelCount * 4);
-                out.fill(255);
-                return out;
-            });
-            const classifyCandidates = Array.from(new Set(['black', ...decoder.candidates, 'white']));
-            const zeroBits = new Array(bitCount).fill(0);
-            const blackBits = new Array(bitCount).fill(1);
-
-            for (let idx = 0; idx < pixelCount * 4; idx += 4) {
-                const r = src[idx];
-                const g = src[idx + 1];
-                const b = src[idx + 2];
-                const stateName = classifyNamedColorSample(r, g, b, classifyCandidates);
-                const stateBits = decoder.states[stateName]
-                    || (stateName === 'black' ? blackBits : zeroBits);
-
-                for (let bitIndex = 0; bitIndex < bitCount; bitIndex++) {
-                    if (!stateBits[bitIndex]) continue;
-                    projected[bitIndex][idx] = 0;
-                    projected[bitIndex][idx + 1] = 0;
-                    projected[bitIndex][idx + 2] = 0;
-                }
-            }
-
-            return projected;
-        }
-
-        function decodeProjectedNewColorCrop(binaryData, crop, expectedQrNo = null, expectedRect = null, excludeRects = null, jsQrOptions = null) {
-            if (!binaryData || !crop) return null;
-
-            const acceptQr = (qr) => {
-                const rawOk = !!(qr && qr.isRaw && qr.dataBytes && qr.dataBytes.length && jsQrOptions && jsQrOptions.captureAppEncDataBytes);
-                if (!qr || (!rawOk && (!qr.data || qr.isRaw))) return false;
-                if (expectedQrNo !== undefined && expectedQrNo !== null) {
-                    if (!rawOk && !matchesExpectedQrNumber(qr, expectedQrNo)) return false;
-                    if (rawOk) qr._newColorRawQrNo = expectedQrNo;
-                }
-
-                const bbox = getQrLocationBBox(qr.location);
-                if (bbox && excludeRects && excludeRects.length > 0) {
-                    const bboxArea = bbox.width * bbox.height;
-                    const bboxCx = bbox.x + bbox.width / 2;
-                    const bboxCy = bbox.y + bbox.height / 2;
-                    for (const rect of excludeRects) {
-                        if (!rect) continue;
-                        const rectArea = rect.width * rect.height;
-                        const overlap = rectIntersectionArea(bbox, rect);
-                        const inside = bboxCx >= rect.x && bboxCx <= (rect.x + rect.width)
-                            && bboxCy >= rect.y && bboxCy <= (rect.y + rect.height);
-                        if (inside || overlap >= Math.min(bboxArea, rectArea) * 0.12) {
-                            return false;
-                        }
-                    }
-                }
-
-                if (!expectedRect) return true;
-                if (!bbox) return true;
-
-                const overlap = rectIntersectionArea(bbox, expectedRect);
-                const bboxArea = bbox.width * bbox.height;
-                const expectedArea = expectedRect.width * expectedRect.height;
-                const bboxCx = bbox.x + bbox.width / 2;
-                const bboxCy = bbox.y + bbox.height / 2;
-                const expectedCx = expectedRect.x + expectedRect.width / 2;
-                const expectedCy = expectedRect.y + expectedRect.height / 2;
-                const centerDx = Math.abs(bboxCx - expectedCx);
-                const centerDy = Math.abs(bboxCy - expectedCy);
-                const sizeMatch = bbox.width >= expectedRect.width * 0.45
-                    && bbox.height >= expectedRect.height * 0.45;
-                const overlapMatch = overlap >= Math.min(bboxArea, expectedArea) * 0.12;
-                const centerMatch = centerDx <= Math.max(12, expectedRect.width * 0.42)
-                    && centerDy <= Math.max(12, expectedRect.height * 0.42);
-
-                return sizeMatch && (overlapMatch || centerMatch);
-            };
-
-            const offsetX = Number(crop.offsetX || 0);
-            const offsetY = Number(crop.offsetY || 0);
-            const probeBase = {
-                probePhase: (jsQrOptions && jsQrOptions.probePhase) || ('newColor projected Q' + (expectedQrNo + 1)),
-                probeImageType: (offsetX === 0 && offsetY === 0 && crop.width === (video && video.videoWidth) && crop.height === (video && video.videoHeight)) ? 'full' : 'crop',
-                probeBin: (jsQrOptions && jsQrOptions.probeBin) || 'projected',
-                probeScale: (jsQrOptions && jsQrOptions.probeScale) || (crop.width + 'x' + crop.height),
-                probeRot: '0',
-                probeMapPoint: (x, y) => {
-                    const localPoint = { x: x + offsetX, y: y + offsetY };
-                    const localToVideo = jsQrOptions && jsQrOptions._localToVideoPoint;
-                    return typeof localToVideo === 'function' ? localToVideo(localPoint.x, localPoint.y) : localPoint;
-                },
-                probeCropRect: { sx: offsetX, sy: offsetY, sw: crop.width, sh: crop.height },
-                ...(jsQrOptions && jsQrOptions.probeQ1Rect ? { probeQ1Rect: jsQrOptions.probeQ1Rect } : {}),
-                ...(jsQrOptions && jsQrOptions.probeExpectedQ2Rect ? { probeExpectedQ2Rect: jsQrOptions.probeExpectedQ2Rect } : {})
-            };
-            const scanPasses = [
-                { data: binaryData, inversionAttempts: 'dontInvert', preBinarized: true, singleLocate: true, ...(jsQrOptions || {}), ...probeBase, expectedRawQrNo: expectedQrNo, probeScale: probeBase.probeScale + '/dontInvert' },
-                { data: binaryData, inversionAttempts: 'attemptBoth', preBinarized: true, singleLocate: true, ...(jsQrOptions || {}), ...probeBase, expectedRawQrNo: expectedQrNo, probeScale: probeBase.probeScale + '/attemptBoth' },
-                { data: binaryData, inversionAttempts: 'attemptBoth', preBinarized: true, singleLocate: false, ...(jsQrOptions || {}), ...probeBase, expectedRawQrNo: expectedQrNo, probeScale: probeBase.probeScale + '/multi' }
-            ];
-
-            for (const scanPass of scanPasses) {
-                const qr = decodeSingleColorQr(scanPass, crop.width, crop.height, acceptQr);
-                if (qr) return offsetQrResult(qr, crop.offsetX, crop.offsetY);
-            }
-
-            return null;
-        }
-
         function buildBitMatrixFromColorStates(states, colorStates, bitIndex) {
             const n = states.length;
             const bits = new Array(n);
@@ -6504,6 +6387,74 @@
             return true;
         }
 
+        function sampleNewColorDisplayStatesFromLocation(src, width, height, locationInfo, decoder) {
+            if (!src || !locationInfo || !locationInfo.mappingFunction || !decoder || !decoder.candidates) return null;
+            const n = locationInfo.dimension || 0;
+            if (n < 21 || ((n - 17) % 4) !== 0) return null;
+            const moduleSize = Math.max(1, locationInfo.moduleSize || 1);
+            const radius = Math.max(1, Math.round(moduleSize * 0.16));
+            const probeOffsets = [
+                { dx: 0, dy: 0, weight: 3 },
+                { dx: -0.18, dy: 0, weight: 1 },
+                { dx: 0.18, dy: 0, weight: 1 },
+                { dx: 0, dy: -0.18, weight: 1 },
+                { dx: 0, dy: 0.18, weight: 1 }
+            ];
+            const states = new Array(n);
+            for (let r = 0; r < n; r++) {
+                states[r] = new Array(n);
+                for (let c = 0; c < n; c++) {
+                    const votes = new Map();
+                    for (const probe of probeOffsets) {
+                        const p = locationInfo.mappingFunction(c + 0.5 + probe.dx, r + 0.5 + probe.dy);
+                        if (!p || p.x < 0 || p.y < 0 || p.x >= width || p.y >= height) continue;
+                        const rgb = averageRgbSample(src, width, height, p.x, p.y, radius);
+                        const state = classifyNamedColorSample(rgb.r, rgb.g, rgb.b, decoder.candidates);
+                        votes.set(state, (votes.get(state) || 0) + probe.weight);
+                    }
+                    if (!votes.size) {
+                        states[r][c] = 'white';
+                        continue;
+                    }
+                    let bestState = decoder.candidates[0] || 'white';
+                    let bestWeight = -1;
+                    for (const [state, weight] of votes.entries()) {
+                        if (weight > bestWeight) {
+                            bestWeight = weight;
+                            bestState = state;
+                        }
+                    }
+                    states[r][c] = bestState;
+                }
+            }
+            return states;
+        }
+
+        function scoreNewColorLocationForExpected(locationInfo, q1Bounds, expectedBounds) {
+            const bbox = getQrLocationBBox(locationInfo && locationInfo.location);
+            if (!bbox) return { reject: false, score: 0, expectedIou: 0, q1Iou: 0 };
+            const q1Iou = q1Bounds ? rectIntersectionArea(bbox, q1Bounds) / Math.max(1, bbox.width * bbox.height + q1Bounds.width * q1Bounds.height - rectIntersectionArea(bbox, q1Bounds)) : 0;
+            if (q1Iou > 0.35) return { reject: true, score: -9999, expectedIou: 0, q1Iou };
+            let expectedIou = 0;
+            let centerScore = 0;
+            if (expectedBounds) {
+                const inter = rectIntersectionArea(bbox, expectedBounds);
+                expectedIou = inter / Math.max(1, bbox.width * bbox.height + expectedBounds.width * expectedBounds.height - inter);
+                const bx = bbox.x + bbox.width / 2;
+                const by = bbox.y + bbox.height / 2;
+                const ex = expectedBounds.x + expectedBounds.width / 2;
+                const ey = expectedBounds.y + expectedBounds.height / 2;
+                const norm = Math.max(1, Math.hypot(expectedBounds.width, expectedBounds.height));
+                centerScore = 1 - Math.min(1, Math.hypot(bx - ex, by - ey) / norm);
+            }
+            return {
+                reject: false,
+                score: expectedIou * 10 + centerScore - q1Iou * 6,
+                expectedIou,
+                q1Iou
+            };
+        }
+
         function processNewColorQRTwin(imageData, width, height, q1Data, existingResult = null, coordinateOptions = null) {
             if (!q1Data || !q1Data.mgmtInfo) return null;
             const decoder = getNewColorDecoder(q1Data.mgmtInfo);
@@ -6536,245 +6487,89 @@
                 _q4Seed: existingResult && existingResult._q4Seed ? existingResult._q4Seed : null
             };
 
-            let localSeedQr = null;
             const q1Bounds = getQrLocationBBox(q1LocalData.location);
             const q1BoundsVideo = getQrLocationBBox(q1Data.location);
             const shiftedBounds = computeShiftedNewColorBounds(q1LocalData);
             const shiftedBoundsVideo = computeShiftedNewColorBounds(q1Data);
-            const unionBounds = mergeBBox(q1Bounds, shiftedBounds);
-            const moduleSize = (shiftedBounds && shiftedBounds.moduleSize) || estimateModuleSizeFromQr(q1LocalData) || 4;
-            const pad = Math.max(14, Math.round(moduleSize * 4));
-            const pairBounds = unionBounds
-                ? normalizeBBox({
-                    x: unionBounds.x - pad,
-                    y: unionBounds.y - pad,
-                    width: unionBounds.width + pad * 2,
-                    height: unionBounds.height + pad * 2
-                }, width, height)
-                : { x: 0, y: 0, width, height };
-            if (!pairBounds) return result;
-
-            const pairCrop = cropMonochromeRgbaImage(
-                imageData.data,
-                width,
-                height,
-                pairBounds.x,
-                pairBounds.y,
-                pairBounds.width,
-                pairBounds.height
-            );
-            const projectedBuffers = buildNewColorProjectionBuffers(
-                pairCrop.data,
-                pairCrop.width * pairCrop.height,
-                decoder
-            );
-            if (projectedBuffers.length === 0) return result;
-
-            const regionProbeOptions = (baseOptions, regionNo, route, binName = 'projected') => ({
-                ...(baseOptions || {}),
-                probePhase: 'newColor ' + route + ' Q' + regionNo,
-                probeBin: binName,
-                probeScale: pairCrop.width + 'x' + pairCrop.height,
-                probeQ1Rect: q1BoundsVideo || q1Bounds,
-                probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds,
-                _localToVideoPoint: localToVideoPoint
+            const locateProbeCollector = [];
+            const locateOptions = {
+                inversionAttempts: 'dontInvert',
+                singleLocate: false,
+                expectedVersionNumber: q1Data.version || q1Data.versionNumber || null,
+                expectedDimension: q1Data.version ? (17 + 4 * q1Data.version) : null,
+                expectedDimensionTolerance: 0,
+                debugProbe: true,
+                probeCollector: locateProbeCollector,
+                _probeMapPoint: localToVideoPoint || ((x, y) => ({ x, y })),
+                _probeCropRect: { sx: 0, sy: 0, sw: width, sh: height },
+                _probeQ1Rect: q1BoundsVideo || q1Bounds,
+                _probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds
+            };
+            const locateImageType = (video && width === video.videoWidth && height === video.videoHeight) ? 'full' : 'crop';
+            recordJsQrInput('newColor color-locate', locateImageType);
+            const locateT0 = nowPerf();
+            let colorLocations = [];
+            try {
+                colorLocations = (window.jsQR && typeof jsQR.extractLocations === 'function')
+                    ? (jsQR.extractLocations(imageData.data, width, height, locateOptions) || [])
+                    : [];
+            } catch (e) {
+                colorLocations = [];
+            }
+            addPhaseElapsed(scanStage, 'newColor color-locate', nowPerf() - locateT0, 'jsqr');
+            recordJsQrProbes(scanStage, 'newColor color-locate', locateProbeCollector, {
+                bin: 'native',
+                scale: width + 'x' + height,
+                rot: '0',
+                dec: 'locate',
+                imageType: locateImageType
             });
 
-            const sampledStates = sampleNewColorDisplayStates(imageData.data, width, height, q1LocalData, decoder);
-            if (sampledStates) {
-                if (!hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 2) && decoder.states && projectedBuffers[0]) {
-                    const qr2Matrix = decodeNewColorBitMatrixQr(
-                        buildBitMatrixFromColorStates(sampledStates, decoder.states, 0),
-                        1,
-                        regionProbeOptions(q2DecodeOptions, 2, 'matrix', 'matrix')
-                    );
-                    if (qr2Matrix) {
-                        storeNewColorRegionDecode(result, 2, qr2Matrix, 'matrix', q1Data.mgmtInfo);
-                    }
-                }
-                if (!hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 3) && decoder.states && projectedBuffers[1]) {
-                    const qr3Matrix = decodeNewColorBitMatrixQr(
-                        buildBitMatrixFromColorStates(sampledStates, decoder.states, 1),
-                        2,
-                        regionProbeOptions(q3DecodeOptions, 3, 'matrix', 'matrix')
-                    );
-                    if (qr3Matrix) {
-                        storeNewColorRegionDecode(result, 3, qr3Matrix, 'matrix', q1Data.mgmtInfo);
-                    }
-                }
-                if (q1Data.mgmtInfo.regionCount === 4 && !hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 4) && decoder.states && projectedBuffers[2]) {
-                    const qr4Matrix = decodeNewColorBitMatrixQr(
-                        buildBitMatrixFromColorStates(sampledStates, decoder.states, 2),
-                        3,
-                        regionProbeOptions(q4DecodeOptions, 4, 'matrix', 'matrix')
-                    );
-                    if (qr4Matrix) {
-                        storeNewColorRegionDecode(result, 4, qr4Matrix, 'matrix', q1Data.mgmtInfo);
-                    }
-                }
-            }
+            colorLocations = colorLocations
+                .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, shiftedBounds) }))
+                .filter(item => item.loc && !item.rank.reject)
+                .sort((a, b) => b.rank.score - a.rank.score)
+                .map(item => item.loc);
 
-            const runPairDecode = (binaryData, needZero, needOne, jsQrOptions = null, route = 'pair') => decodeTargetedColorPair([
-                {
-                    data: binaryData,
-                    inversionAttempts: 'dontInvert',
-                    preBinarized: true,
-                    singleLocate: true,
-                    ...(jsQrOptions || {}),
-                    probePhase: ((jsQrOptions && jsQrOptions.probePhase) || ('newColor ' + route)) + ' pair/dontInvert',
-                    probeImageType: 'crop',
-                    probeBin: (jsQrOptions && jsQrOptions.probeBin) || 'projected',
-                    probeScale: pairCrop.width + 'x' + pairCrop.height,
-                    probeMapPoint: (x, y) => {
-                        const localPoint = { x: x + pairCrop.offsetX, y: y + pairCrop.offsetY };
-                        return localToVideoPoint ? localToVideoPoint(localPoint.x, localPoint.y) : localPoint;
-                    },
-                    probeCropRect: { sx: pairCrop.offsetX, sy: pairCrop.offsetY, sw: pairCrop.width, sh: pairCrop.height },
+            const regionDecodeOptions = (regionNo, locInfo) => {
+                const baseOptions = regionNo === 2 ? q2DecodeOptions : (regionNo === 3 ? q3DecodeOptions : q4DecodeOptions);
+                const loc = locInfo && locInfo.location;
+                return {
+                    ...(baseOptions || {}),
+                    probePhase: 'newColor matrix-located Q' + regionNo,
+                    probeBin: 'matrix',
+                    probeScale: (locInfo && locInfo.dimension ? locInfo.dimension : '?') + 'x' + (locInfo && locInfo.dimension ? locInfo.dimension : '?'),
                     probeQ1Rect: q1BoundsVideo || q1Bounds,
-                    probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds
-                },
-                {
-                    data: binaryData,
-                    inversionAttempts: 'attemptBoth',
-                    preBinarized: true,
-                    singleLocate: true,
-                    ...(jsQrOptions || {}),
-                    probePhase: ((jsQrOptions && jsQrOptions.probePhase) || ('newColor ' + route)) + ' pair/attemptBoth',
-                    probeImageType: 'crop',
-                    probeBin: (jsQrOptions && jsQrOptions.probeBin) || 'projected',
-                    probeScale: pairCrop.width + 'x' + pairCrop.height,
-                    probeMapPoint: (x, y) => {
-                        const localPoint = { x: x + pairCrop.offsetX, y: y + pairCrop.offsetY };
-                        return localToVideoPoint ? localToVideoPoint(localPoint.x, localPoint.y) : localPoint;
-                    },
-                    probeCropRect: { sx: pairCrop.offsetX, sy: pairCrop.offsetY, sw: pairCrop.width, sh: pairCrop.height },
-                    probeQ1Rect: q1BoundsVideo || q1Bounds,
-                    probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds
-                }
-            ], pairCrop.width, pairCrop.height, needZero, needOne);
+                    probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds,
+                    _localToVideoPoint: localToVideoPoint,
+                    _probeMapPoint: localToVideoPoint || ((x, y) => ({ x, y })),
+                    _probeCropRect: { sx: 0, sy: 0, sw: width, sh: height },
+                    _probeLocationDimension: locInfo && locInfo.dimension,
+                    _probeLocationModuleSize: locInfo && locInfo.moduleSize,
+                    _probeLocationMeta: locInfo && locInfo.probeMeta,
+                    _probeLocationCorners: loc ? {
+                        topLeft: loc.topLeftCorner,
+                        topRight: loc.topRightCorner,
+                        bottomRight: loc.bottomRightCorner,
+                        bottomLeft: loc.bottomLeftCorner
+                    } : null
+                };
+            };
 
-            if (!hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 2) && projectedBuffers[0]) {
-                const pairResult = runPairDecode(projectedBuffers[0], true, true, regionProbeOptions(q2DecodeOptions, 2, 'pair', 'projected'), 'pair Q2');
-                if (pairResult && pairResult.results) {
-                    for (const qr of pairResult.results) {
-                        const adjusted = offsetQrResult(qr, pairCrop.offsetX, pairCrop.offsetY);
-                        if ((isRawNewColorAppEncCandidate(adjusted) || matchesExpectedQrNumber(adjusted, 1)) && !hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 2)) {
-                            localSeedQr = localSeedQr || adjusted;
-                            storeNewColorRegionDecode(result, 2, toVideoQr(adjusted), 'pair', q1Data.mgmtInfo);
-                        }
-                    }
+            for (const locInfo of colorLocations) {
+                const sampledStates = sampleNewColorDisplayStatesFromLocation(imageData.data, width, height, locInfo, decoder);
+                if (!sampledStates) continue;
+                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) continue;
+                    const bitIndex = regionNo - 2;
+                    const bits = buildBitMatrixFromColorStates(sampledStates, decoder.states, bitIndex);
+                    const qrMatrix = decodeNewColorBitMatrixQr(bits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
+                    if (!qrMatrix) continue;
+                    qrMatrix.location = locInfo.location;
+                    qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
+                    storeNewColorRegionDecode(result, regionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
                 }
-            }
-
-            if (q1Data.mgmtInfo.regionCount === 4 && !hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 4) && projectedBuffers[2]) {
-                const pairResult = runPairDecode(projectedBuffers[2], true, true, regionProbeOptions(q4DecodeOptions, 4, 'pair', 'projected'), 'pair Q4');
-                if (pairResult && pairResult.results) {
-                    for (const qr of pairResult.results) {
-                        const adjusted = offsetQrResult(qr, pairCrop.offsetX, pairCrop.offsetY);
-                        if ((isRawNewColorAppEncCandidate(adjusted) || matchesExpectedQrNumber(adjusted, 3)) && !hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 4)) {
-                            localSeedQr = localSeedQr || adjusted;
-                            storeNewColorRegionDecode(result, 4, toVideoQr(adjusted), 'pair', q1Data.mgmtInfo);
-                        }
-                    }
-                }
-            }
-
-            let expectedColorRect = null;
-            const seedQr = localSeedQr || toLocalQr(result._q2Seed || result._q3Seed || result._q4Seed);
-            if (seedQr && seedQr.location) {
-                const seedBounds = getQrLocationBBox(seedQr.location);
-                if (seedBounds) {
-                    expectedColorRect = normalizeBBox({
-                        x: seedBounds.x - pairCrop.offsetX,
-                        y: seedBounds.y - pairCrop.offsetY,
-                        width: seedBounds.width,
-                        height: seedBounds.height
-                    }, pairCrop.width, pairCrop.height);
-                }
-            }
-            if (!expectedColorRect && shiftedBounds) {
-                expectedColorRect = normalizeBBox({
-                    x: shiftedBounds.x - pairCrop.offsetX,
-                    y: shiftedBounds.y - pairCrop.offsetY,
-                    width: shiftedBounds.width,
-                    height: shiftedBounds.height
-                }, pairCrop.width, pairCrop.height);
-            }
-
-            if (!hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 2) && projectedBuffers[0]) {
-                const qr2 = decodeProjectedNewColorCrop(projectedBuffers[0], pairCrop, 1, expectedColorRect, null, regionProbeOptions(q2DecodeOptions, 2, 'projected-pair', 'projected'));
-                if (qr2) {
-                    storeNewColorRegionDecode(result, 2, toVideoQr(qr2), 'projected-pair', q1Data.mgmtInfo);
-                    const seedBounds = getQrLocationBBox(qr2.location);
-                    if (seedBounds) {
-                        expectedColorRect = normalizeBBox({
-                            x: seedBounds.x - pairCrop.offsetX,
-                            y: seedBounds.y - pairCrop.offsetY,
-                            width: seedBounds.width,
-                            height: seedBounds.height
-                        }, pairCrop.width, pairCrop.height);
-                    }
-                }
-            }
-
-            if (!hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 3) && projectedBuffers[1]) {
-                const qr3 = decodeProjectedNewColorCrop(projectedBuffers[1], pairCrop, 2, expectedColorRect, null, regionProbeOptions(q3DecodeOptions, 3, 'projected-pair', 'projected'));
-                if (qr3) {
-                    storeNewColorRegionDecode(result, 3, toVideoQr(qr3), 'projected-pair', q1Data.mgmtInfo);
-                }
-            }
-
-            if (q1Data.mgmtInfo.regionCount === 4 && !hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 4) && projectedBuffers[2]) {
-                const qr4 = decodeProjectedNewColorCrop(projectedBuffers[2], pairCrop, 3, expectedColorRect, null, regionProbeOptions(q4DecodeOptions, 4, 'projected-pair', 'projected'));
-                if (qr4) {
-                    storeNewColorRegionDecode(result, 4, toVideoQr(qr4), 'projected-pair', q1Data.mgmtInfo);
-                }
-            }
-
-            const hasRegion2 = hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 2);
-            const hasRegion3 = hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 3);
-            const hasRegion4 = hasNewColorRegionAcquired(result, q1Data.mgmtInfo, 4);
-            const needFullFrameFallback = !hasRegion2
-                || !hasRegion3
-                || (q1Data.mgmtInfo.regionCount === 4 && !hasRegion4);
-            if (needFullFrameFallback) {
-                const fullCrop = { data: imageData.data, width, height, offsetX: 0, offsetY: 0 };
-                const fullProjected = buildNewColorProjectionBuffers(imageData.data, width * height, decoder);
-                const fullExcludeRects = q1Bounds ? [q1Bounds] : null;
-                if (!hasRegion2 && fullProjected[0]) {
-                    const qr2 = decodeProjectedNewColorCrop(fullProjected[0], fullCrop, 1, null, fullExcludeRects, {
-                        ...regionProbeOptions(q2DecodeOptions, 2, 'projected-full', 'projected-full'),
-                        probeScale: width + 'x' + height
-                    });
-                    if (qr2) {
-                        storeNewColorRegionDecode(result, 2, toVideoQr(qr2), 'projected-full', q1Data.mgmtInfo);
-                    }
-                }
-
-                let fullExpectedRect = null;
-                const fullSeed = localSeedQr || toLocalQr(result._q2Seed || result._q3Seed || result._q4Seed || (existingResult && (existingResult._q2Seed || existingResult._q3Seed || existingResult._q4Seed)));
-                if (fullSeed && fullSeed.location) {
-                    fullExpectedRect = getQrLocationBBox(fullSeed.location);
-                }
-
-                if (!hasRegion3 && fullProjected[1]) {
-                    const qr3 = decodeProjectedNewColorCrop(fullProjected[1], fullCrop, 2, fullExpectedRect, fullExcludeRects, {
-                        ...regionProbeOptions(q3DecodeOptions, 3, 'projected-full', 'projected-full'),
-                        probeScale: width + 'x' + height
-                    });
-                    if (qr3) {
-                        storeNewColorRegionDecode(result, 3, toVideoQr(qr3), 'projected-full', q1Data.mgmtInfo);
-                    }
-                }
-                if (q1Data.mgmtInfo.regionCount === 4 && !hasRegion4 && fullProjected[2]) {
-                    const qr4 = decodeProjectedNewColorCrop(fullProjected[2], fullCrop, 3, fullExpectedRect, fullExcludeRects, {
-                        ...regionProbeOptions(q4DecodeOptions, 4, 'projected-full', 'projected-full'),
-                        probeScale: width + 'x' + height
-                    });
-                    if (qr4) {
-                        storeNewColorRegionDecode(result, 4, toVideoQr(qr4), 'projected-full', q1Data.mgmtInfo);
-                    }
-                }
+                if (isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo)) break;
             }
 
             if (q1Data.mgmtInfo && q1Data.mgmtInfo.dataCompBits === 0 && result.qr3 && q1Data.text && result.qr3 === q1Data.text) {

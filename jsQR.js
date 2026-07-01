@@ -670,6 +670,90 @@ function jsQR(data, width, height, providedOptions) {
     return result;
 }
 jsQR.default = jsQR;
+function collectExtractedLocations(matrix, options, inverted) {
+    var locations = locator_1.locate(matrix, options);
+    if (!locations) {
+        pushDebugProbe(options, "no_locator", {
+            stage: "locator",
+            matrixWidth: matrix ? matrix.width : null,
+            matrixHeight: matrix ? matrix.height : null
+        });
+        return [];
+    }
+    if (locations && options && options.singleLocate && locations.length > 3) {
+        locations = locations.slice(0, 3);
+    }
+    var out = [];
+    for (var i = 0; i < locations.length; i++) {
+        var location_2 = locations[i];
+        try {
+            options._probeLocationIndex = i;
+            options._probeLocationDimension = location_2.dimension;
+            options._probeLocationModuleSize = location_2.moduleSize;
+            options._probeLocationMeta = location_2.probeMeta || null;
+            var extracted = extractor_1.extract(matrix, location_2);
+            var corners = {
+                topLeft: extracted.mappingFunction(0, 0),
+                topRight: extracted.mappingFunction(location_2.dimension, 0),
+                bottomRight: extracted.mappingFunction(location_2.dimension, location_2.dimension),
+                bottomLeft: extracted.mappingFunction(0, location_2.dimension)
+            };
+            out.push({
+                location: {
+                    topRightCorner: corners.topRight,
+                    topLeftCorner: corners.topLeft,
+                    bottomRightCorner: corners.bottomRight,
+                    bottomLeftCorner: corners.bottomLeft,
+                    topRightFinderPattern: location_2.topRight,
+                    topLeftFinderPattern: location_2.topLeft,
+                    bottomLeftFinderPattern: location_2.bottomLeft,
+                    bottomRightAlignmentPattern: location_2.alignmentPattern,
+                },
+                dimension: location_2.dimension,
+                moduleSize: location_2.moduleSize,
+                mappingFunction: extracted.mappingFunction,
+                sampleStats: extracted.sampleStats || null,
+                sampleSameCounts: extracted.sampleSameCounts || null,
+                probeMeta: location_2.probeMeta || null,
+                inverted: !!inverted
+            });
+        }
+        catch (e) {
+            pushDebugProbe(options, "extract_failed", {
+                stage: "extract",
+                message: e && e.message ? e.message : String(e)
+            });
+        }
+    }
+    return out;
+}
+jsQR.extractLocations = function (data, width, height, providedOptions) {
+    if (providedOptions === void 0) { providedOptions = {}; }
+    var options = {
+        inversionAttempts: providedOptions.inversionAttempts || "dontInvert",
+        preBinarized: providedOptions.preBinarized,
+        singleLocate: providedOptions.singleLocate !== false,
+        expectedVersionNumber: providedOptions.expectedVersionNumber,
+        expectedDimension: providedOptions.expectedDimension,
+        expectedDimensionTolerance: providedOptions.expectedDimensionTolerance,
+        debugProbe: providedOptions.debugProbe,
+        probeCollector: providedOptions.probeCollector,
+        _probeMapPoint: providedOptions._probeMapPoint,
+        _probeCropRect: providedOptions._probeCropRect,
+        _probeQ1Rect: providedOptions._probeQ1Rect,
+        _probeExpectedQ2Rect: providedOptions._probeExpectedQ2Rect
+    };
+    var shouldInvert = options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst";
+    var tryInvertedFirst = options.inversionAttempts === "onlyInvert" || options.inversionAttempts === "invertFirst";
+    var _a = options.preBinarized ? buildBitMatrixFromBinary(data, width, height, shouldInvert) : binarizer_1.binarize(data, width, height, shouldInvert), binarized = _a.binarized, inverted = _a.inverted;
+    options._probeInverted = !!tryInvertedFirst;
+    var first = collectExtractedLocations(tryInvertedFirst ? inverted : binarized, options, !!tryInvertedFirst);
+    if (first.length || !shouldInvert || !inverted) {
+        return first;
+    }
+    options._probeInverted = !tryInvertedFirst;
+    return collectExtractedLocations(tryInvertedFirst ? binarized : inverted, options, !tryInvertedFirst);
+};
 function buildModuleBitMatrix(moduleMatrix) {
     if (!moduleMatrix) {
         return null;
