@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader88</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1956,22 +1956,53 @@
             if (el) el.innerText = formatScanDebugStats();
         }
 
+        function fallbackCopyText(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text || '';
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '0';
+            ta.style.left = '0';
+            ta.style.width = '1px';
+            ta.style.height = '1px';
+            ta.style.opacity = '0.01';
+            ta.style.zIndex = '-1';
+            document.body.appendChild(ta);
+            try {
+                ta.focus({ preventScroll: true });
+            } catch (e) {
+                statusText.innerText = '\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u306b\u30b3\u30d4\u30fc\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f';
+                return;
+                statusText.innerText = 'クリップボードにコピーできませんでした';
+                return;
+                ta.focus();
+            }
+            ta.select();
+            try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+            let ok = false;
+            try { ok = !!document.execCommand('copy'); } catch (e) { ok = false; }
+            document.body.removeChild(ta);
+            return ok;
+        }
+
+        async function copyTextToClipboard(text) {
+            // file:// や一部WebViewでは Clipboard API が拒否されるため、同期fallbackを先に試す。
+            if (fallbackCopyText(text)) return true;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text || '');
+                return true;
+            }
+            return false;
+        }
+
         async function copyScanDebugInfo() {
             const text = formatScanDebugStats();
             try {
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    await navigator.clipboard.writeText(text);
-                } else {
-                    const ta = document.createElement('textarea');
-                    ta.value = text;
-                    ta.style.position = 'fixed';
-                    ta.style.left = '-9999px';
-                    document.body.appendChild(ta);
-                    ta.focus();
-                    ta.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(ta);
-                }
+                const ok = await copyTextToClipboard(text);
+                statusText.innerText = ok ? '\u8aad\u53d6\u30c7\u30d0\u30c3\u30b0\u60c5\u5831\u3092\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f' : '\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u306b\u30b3\u30d4\u30fc\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f';
+                return;
+                statusText.innerText = ok ? '読取デバッグ情報をコピーしました' : 'クリップボードにコピーできませんでした';
+                return;
                 statusText.innerText = '読取デバッグ情報をコピーしました';
             } catch (e) {
                 statusText.innerText = 'コピーに失敗しました';
@@ -2111,14 +2142,13 @@
         async function copyAllDebugLog() {
             const text = formatAccumulatedDebugLog();
             try {
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    await navigator.clipboard.writeText(text);
-                } else {
-                    const ta = document.createElement('textarea');
-                    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
-                    document.body.appendChild(ta); ta.focus(); ta.select();
-                    document.execCommand('copy'); document.body.removeChild(ta);
+                const ok = await copyTextToClipboard(text);
+                if (typeof statusText !== 'undefined' && statusText) {
+                    statusText.innerText = ok
+                        ? '\u30c7\u30d0\u30c3\u30b0\u30ed\u30b0(' + getDebugLogCount() + '\u4ef6)\u3092\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f'
+                        : '\u30af\u30ea\u30c3\u30d7\u30dc\u30fc\u30c9\u306b\u30b3\u30d4\u30fc\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f';
                 }
+                return;
                 if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'デバッグログ(' + getDebugLogCount() + '件)をコピーしました';
             } catch (e) {
                 if (typeof statusText !== 'undefined' && statusText) statusText.innerText = 'コピーに失敗しました';
