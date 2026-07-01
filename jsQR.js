@@ -1582,6 +1582,35 @@ function decodeMatrix(matrix, options) {
             correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
         }
     }
+    if (options && options.captureAppEncDataBytes && !(options.appEncMask && options.appEncMask.length > 0)) {
+        pushDebugProbe(options, "raw_capture", {
+            stage: "raw_capture",
+            versionNumber: version.versionNumber,
+            ecLevel: ecLevel,
+            dataMask: formatInfo.dataMask,
+            moduleQuality: dataModuleQuality,
+            totalCodewords: totalCodewords,
+            totalDataCodewords: totalBytes,
+            blockCount: dataBlocks.length
+        });
+        return {
+            isRaw: true,
+            codewords: originalCodewords,
+            correctedCodewords: correctedCodewords,
+            dataBytes: Array.from(resultBytes),
+            version: version,
+            versionNumber: version.versionNumber,
+            formatInfo: formatInfo,
+            rawMatrixData: {
+                codewords: originalCodewords,
+                correctedCodewords: correctedCodewords,
+                dataBytes: Array.from(resultBytes),
+                version: version,
+                versionNumber: version.versionNumber,
+                formatInfo: formatInfo
+            }
+        };
+    }
     try {
         var encryptedDataBytes = Array.from(resultBytes);
         var decodeBytes = resultBytes;
