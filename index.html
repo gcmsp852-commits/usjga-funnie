@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader1</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -979,6 +979,9 @@
         const COLOR_DETECT_REFRESH_EVERY = 2;
         const COLOR_BBOX_PADDING = 64;
         const NEW_COLOR_SHIFT_MODULES = 8.5;
+        const NEW_COLOR_AMBIGUOUS_MARGIN = 35;
+        const NEW_COLOR_AMBIGUOUS_VOTE_MARGIN = 1;
+        const NEW_COLOR_WORST_CELL_LIMIT = 20;
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -1338,6 +1341,7 @@
                 barcodeBoxes: [],
                 stage1BdQ2Candidate: null,
                 q2NotRequiredReason: null,
+                newColorColorProbes: [],
                 qrMeta: {},          // ★ P3: 第1/第2QRのメタ（種類・version・mask・EC・配置パターン）
                 prelocateWin: null,  // ★ P3: 即時プリロケートが当たった変種(スケール×二値化×回転)
                 readOrientation: (typeof readOrientationManual !== 'undefined' ? readOrientationManual : 'portrait'), // ★ 手動選択の読取向き
@@ -1407,12 +1411,15 @@
         function recordJsQrProbes(stage, phase, probes, meta = {}) {
             if (!Array.isArray(probes) || probes.length === 0) return;
             const phaseStats = getPhaseDebugStats(stage, phase);
+            const keepProbeSamples = /newColor|matrix-located/.test(String(phase || '')) ||
+                meta.bin === 'matrix' ||
+                meta.dec === 'locate';
             for (const probe of probes) {
                 if (!probe || !probe.reason) continue;
                 const key = probe.reason;
                 phaseStats.jsqrProbeTotal += 1;
                 phaseStats.jsqrProbeCounts[key] = (phaseStats.jsqrProbeCounts[key] || 0) + 1;
-                if (phaseStats.jsqrProbeSamples.length < 8 || key === 'decode_success') {
+                if (keepProbeSamples && (phaseStats.jsqrProbeSamples.length < 8 || key === 'decode_success')) {
                     phaseStats.jsqrProbeSamples.push({
                         reason: key,
                         stage: probe.stage || '',
@@ -1478,6 +1485,16 @@
                         phaseStats.jsqrProbeSamples = head.concat(keep);
                     }
                 }
+            }
+        }
+
+        function recordNewColorColorProbe(probe) {
+            if (!probe) return;
+            const stats = getScanDebugStats();
+            if (!Array.isArray(stats.newColorColorProbes)) stats.newColorColorProbes = [];
+            stats.newColorColorProbes.push(probe);
+            if (stats.newColorColorProbes.length > 24) {
+                stats.newColorColorProbes = stats.newColorColorProbes.slice(-24);
             }
         }
 
@@ -1827,6 +1844,36 @@
             }
             lines.push('');
 
+            if (Array.isArray(stats.newColorColorProbes) && stats.newColorColorProbes.length) {
+                lines.push('newColor color-classify probe');
+                stats.newColorColorProbes.slice(-8).forEach((cp, idx) => {
+                    const s = cp.summary || {};
+                    const byRegion = s.byRegion || {};
+                    const regionText = Object.keys(byRegion).sort().map(regionNo => {
+                        const r = byRegion[regionNo] || {};
+                        return `Q${regionNo}:amb=${r.ambiguous || 0},fmt=${r.formatAmbiguous || 0},res=${cp.regions && cp.regions[regionNo] ? cp.regions[regionNo] : '-'}`;
+                    }).join(' / ');
+                    const confusion = Array.isArray(s.confusionTop) && s.confusionTop.length
+                        ? s.confusionTop.map(x => `${x.pair}:${x.count}`).join(' ')
+                        : '-';
+                    lines.push(
+                        `  #${idx + 1} loc=${cp.locationIndex} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
+                        `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
+                        `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
+                        `thrMargin=${s.threshold ? s.threshold.margin : '-'} ${regionText} confusion=${confusion}`
+                    );
+                    if (Array.isArray(s.worstCellsTop) && s.worstCellsTop.length) {
+                        const worst = s.worstCellsTop.slice(0, 5).map(c => {
+                            const rgb = c.rgb ? `${c.rgb.r}/${c.rgb.g}/${c.rgb.b}` : '-';
+                            return `(${c.r},${c.c}) ${c.bestColor}>${c.secondColor || '-'} m=${fmtNum(c.margin)} v=${c.vote} rgb=${rgb}${c.format ? ':fmt' : ''}`;
+                        }).join(' | ');
+                        lines.push(`    worstCells: ${worst}`);
+                    }
+                });
+                lines.push('');
+            }
+
             const renderStage = (stageKey) => {
                 lines.push(`Stage ${stageKey}`);
                 const stage = stats.stages[String(stageKey)];
@@ -1857,7 +1904,8 @@
                             .map(([k, v]) => `${k} ${v}`)
                             .join(' / ');
                         lines.push(`    probe: ${counts}`);
-                        if (Array.isArray(p.jsqrProbeSamples) && p.jsqrProbeSamples.length) {
+                        const showProbeSamples = /newColor|matrix-located/.test(String(phaseKey || ''));
+                        if (showProbeSamples && Array.isArray(p.jsqrProbeSamples) && p.jsqrProbeSamples.length) {
                             p.jsqrProbeSamples.slice(0, 4).forEach((s, idx) => {
                                 const details = [
                                     s.stage ? `stage=${s.stage}` : '',
@@ -5946,6 +5994,40 @@
             return bestName;
         }
 
+        function classifyNamedColorSampleDetailed(r, g, b, candidateNames) {
+            if (!candidateNames || candidateNames.length === 0) {
+                return { best: 'white', second: null, bestScore: 0, secondScore: null, margin: Infinity, forced: true };
+            }
+            const hsv = rgbToHsv(r, g, b);
+            const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+            const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+            if (candidateNames.includes('black') && luma <= 18 && chroma <= 70) {
+                return { best: 'black', second: null, bestScore: 0, secondScore: null, margin: Infinity, forced: true };
+            }
+            if (candidateNames.includes('white') && luma >= 245 && chroma <= 50) {
+                return { best: 'white', second: null, bestScore: 0, secondScore: null, margin: Infinity, forced: true };
+            }
+            let best = null;
+            let second = null;
+            for (const name of candidateNames) {
+                const score = scoreNewColorCandidate(r, g, b, hsv, luma, chroma, name);
+                if (!best || score < best.score) {
+                    second = best;
+                    best = { name, score };
+                } else if (!second || score < second.score) {
+                    second = { name, score };
+                }
+            }
+            return {
+                best: best ? best.name : 'white',
+                second: second ? second.name : null,
+                bestScore: best ? best.score : null,
+                secondScore: second ? second.score : null,
+                margin: (best && second) ? (second.score - best.score) : Infinity,
+                forced: false
+            };
+        }
+
         function buildTriColorDecoder(colorSpecBits) {
             const selected = [];
             for (let i = 0; i < TRI_COLOR_ORDER.length; i++) {
@@ -6387,7 +6469,106 @@
             return true;
         }
 
-        function sampleNewColorDisplayStatesFromLocation(src, width, height, locationInfo, decoder) {
+        function buildQrFormatCellSet(n) {
+            const set = new Set();
+            const add = (r, c) => {
+                if (r >= 0 && c >= 0 && r < n && c < n) set.add(r + ',' + c);
+            };
+            for (let c = 0; c <= 8; c++) {
+                if (c !== 6) add(8, c);
+            }
+            for (let r = 0; r <= 8; r++) {
+                if (r !== 6 && r !== 8) add(r, 8);
+            }
+            for (let r = n - 7; r < n; r++) add(r, 8);
+            for (let c = n - 8; c < n; c++) add(8, c);
+            return set;
+        }
+
+        function colorBitsForState(decoder, state) {
+            return (decoder && decoder.states && decoder.states[state]) ? decoder.states[state] : [];
+        }
+
+        function colorStateChangesBit(decoder, a, b, bitIndex) {
+            const ab = colorBitsForState(decoder, a);
+            const bb = colorBitsForState(decoder, b);
+            return !!ab[bitIndex] !== !!bb[bitIndex];
+        }
+
+        function summarizeNewColorCellProbe(cells, decoder, n, regionCount) {
+            const total = Math.max(1, n * n);
+            const formatSet = buildQrFormatCellSet(n);
+            const byRegion = {};
+            for (let regionNo = 2; regionNo <= regionCount; regionNo++) {
+                byRegion[String(regionNo)] = { ambiguous: 0, formatAmbiguous: 0 };
+            }
+            const confusion = new Map();
+            const worst = [];
+            let ambiguousTotal = 0;
+            let minMargin = Infinity;
+            let marginSum = 0;
+            let marginCount = 0;
+
+            for (const cell of cells) {
+                if (!cell) continue;
+                const margin = Number.isFinite(cell.margin) ? cell.margin : Infinity;
+                if (Number.isFinite(margin)) {
+                    minMargin = Math.min(minMargin, margin);
+                    marginSum += margin;
+                    marginCount++;
+                }
+                const ambiguous = !!cell.ambiguous;
+                if (!ambiguous) continue;
+                ambiguousTotal++;
+                const fmt = formatSet.has(cell.r + ',' + cell.c);
+                const key = cell.state + '>' + (cell.secondState || '-');
+                confusion.set(key, (confusion.get(key) || 0) + 1);
+                for (let regionNo = 2; regionNo <= regionCount; regionNo++) {
+                    const bitIndex = regionNo - 2;
+                    if (colorStateChangesBit(decoder, cell.state, cell.secondState, bitIndex)) {
+                        const bucket = byRegion[String(regionNo)];
+                        bucket.ambiguous++;
+                        if (fmt) bucket.formatAmbiguous++;
+                    }
+                }
+                worst.push({
+                    r: cell.r,
+                    c: cell.c,
+                    bestColor: cell.state,
+                    secondColor: cell.secondState,
+                    margin,
+                    vote: cell.voteMargin,
+                    rgb: cell.rgb,
+                    format: fmt
+                });
+            }
+            worst.sort((a, b) => {
+                const ma = Number.isFinite(a.margin) ? a.margin : 999999;
+                const mb = Number.isFinite(b.margin) ? b.margin : 999999;
+                if (ma !== mb) return ma - mb;
+                return (a.vote || 0) - (b.vote || 0);
+            });
+            return {
+                n,
+                totalCells: total,
+                ambiguousTotal,
+                ambiguousPct: ambiguousTotal / total,
+                minMargin: Number.isFinite(minMargin) ? minMargin : null,
+                avgMargin: marginCount ? marginSum / marginCount : null,
+                threshold: {
+                    margin: NEW_COLOR_AMBIGUOUS_MARGIN,
+                    voteMargin: NEW_COLOR_AMBIGUOUS_VOTE_MARGIN
+                },
+                byRegion,
+                confusionTop: Array.from(confusion.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 6)
+                    .map(([pair, count]) => ({ pair, count })),
+                worstCellsTop: worst.slice(0, NEW_COLOR_WORST_CELL_LIMIT)
+            };
+        }
+
+        function sampleNewColorDisplayStatesFromLocation(src, width, height, locationInfo, decoder, colorProbe = null) {
             if (!src || !locationInfo || !locationInfo.mappingFunction || !decoder || !decoder.candidates) return null;
             const n = locationInfo.dimension || 0;
             if (n < 21 || ((n - 17) % 4) !== 0) return null;
@@ -6401,31 +6582,83 @@
                 { dx: 0, dy: 0.18, weight: 1 }
             ];
             const states = new Array(n);
+            const cells = colorProbe ? [] : null;
             for (let r = 0; r < n; r++) {
                 states[r] = new Array(n);
                 for (let c = 0; c < n; c++) {
                     const votes = new Map();
+                    const sampleDetails = [];
+                    let rgbSum = { r: 0, g: 0, b: 0, count: 0 };
                     for (const probe of probeOffsets) {
                         const p = locationInfo.mappingFunction(c + 0.5 + probe.dx, r + 0.5 + probe.dy);
                         if (!p || p.x < 0 || p.y < 0 || p.x >= width || p.y >= height) continue;
                         const rgb = averageRgbSample(src, width, height, p.x, p.y, radius);
-                        const state = classifyNamedColorSample(rgb.r, rgb.g, rgb.b, decoder.candidates);
+                        const detail = classifyNamedColorSampleDetailed(rgb.r, rgb.g, rgb.b, decoder.candidates);
+                        const state = detail.best;
                         votes.set(state, (votes.get(state) || 0) + probe.weight);
+                        sampleDetails.push({ ...detail, weight: probe.weight, rgb });
+                        rgbSum.r += rgb.r;
+                        rgbSum.g += rgb.g;
+                        rgbSum.b += rgb.b;
+                        rgbSum.count++;
                     }
                     if (!votes.size) {
                         states[r][c] = 'white';
+                        if (cells) {
+                            cells.push({
+                                r, c, state: 'white', secondState: null, margin: 0, voteMargin: 0,
+                                ambiguous: true, rgb: { r: 255, g: 255, b: 255 }
+                            });
+                        }
                         continue;
                     }
                     let bestState = decoder.candidates[0] || 'white';
                     let bestWeight = -1;
+                    let secondState = null;
+                    let secondWeight = -1;
                     for (const [state, weight] of votes.entries()) {
                         if (weight > bestWeight) {
+                            secondState = bestState;
+                            secondWeight = bestWeight;
                             bestWeight = weight;
                             bestState = state;
+                        } else if (weight > secondWeight) {
+                            secondWeight = weight;
+                            secondState = state;
                         }
                     }
                     states[r][c] = bestState;
+                    if (cells) {
+                        let minDetail = null;
+                        for (const d of sampleDetails) {
+                            if (!minDetail || (Number.isFinite(d.margin) ? d.margin : Infinity) < (Number.isFinite(minDetail.margin) ? minDetail.margin : Infinity)) {
+                                minDetail = d;
+                            }
+                        }
+                        if (!secondState || secondWeight < 0) secondState = minDetail ? minDetail.second : null;
+                        const margin = minDetail ? minDetail.margin : Infinity;
+                        const voteMargin = bestWeight - Math.max(0, secondWeight);
+                        cells.push({
+                            r,
+                            c,
+                            state: bestState,
+                            secondState,
+                            margin,
+                            voteMargin,
+                            ambiguous: (Number.isFinite(margin) && margin <= NEW_COLOR_AMBIGUOUS_MARGIN) ||
+                                voteMargin <= NEW_COLOR_AMBIGUOUS_VOTE_MARGIN ||
+                                votes.size > 1,
+                            rgb: rgbSum.count ? {
+                                r: Math.round(rgbSum.r / rgbSum.count),
+                                g: Math.round(rgbSum.g / rgbSum.count),
+                                b: Math.round(rgbSum.b / rgbSum.count)
+                            } : null
+                        });
+                    }
                 }
+            }
+            if (colorProbe) {
+                colorProbe.summary = summarizeNewColorCellProbe(cells, decoder, n, colorProbe.regionCount || 3);
             }
             return states;
         }
@@ -6556,18 +6789,45 @@
                 };
             };
 
-            for (const locInfo of colorLocations) {
-                const sampledStates = sampleNewColorDisplayStatesFromLocation(imageData.data, width, height, locInfo, decoder);
+            for (let locIdx = 0; locIdx < colorLocations.length; locIdx++) {
+                const locInfo = colorLocations[locIdx];
+                const colorProbe = {
+                    phase: 'newColor color-classify',
+                    scanStage,
+                    imageType: locateImageType,
+                    locationIndex: locIdx,
+                    fpRank: locInfo && locInfo.probeMeta ? locInfo.probeMeta.fpRank : null,
+                    alignFixed: !!(locInfo && locInfo.probeMeta && locInfo.probeMeta.alignmentForcedExpected),
+                    alignD: locInfo && locInfo.probeMeta ? locInfo.probeMeta.alignmentDistance : null,
+                    alignTol: locInfo && locInfo.probeMeta ? locInfo.probeMeta.alignmentTolerance : null,
+                    dimension: locInfo && locInfo.dimension,
+                    moduleSize: locInfo && locInfo.moduleSize,
+                    regionCount: q1Data.mgmtInfo.regionCount,
+                    regions: {}
+                };
+                const sampledStates = sampleNewColorDisplayStatesFromLocation(imageData.data, width, height, locInfo, decoder, colorProbe);
                 if (!sampledStates) continue;
                 for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
-                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) continue;
+                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) {
+                        colorProbe.regions[String(regionNo)] = 'already_acquired';
+                        continue;
+                    }
                     const bitIndex = regionNo - 2;
                     const bits = buildBitMatrixFromColorStates(sampledStates, decoder.states, bitIndex);
                     const qrMatrix = decodeNewColorBitMatrixQr(bits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
-                    if (!qrMatrix) continue;
+                    if (!qrMatrix) {
+                        colorProbe.regions[String(regionNo)] = 'failed';
+                        continue;
+                    }
                     qrMatrix.location = locInfo.location;
                     qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
                     storeNewColorRegionDecode(result, regionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
+                    colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : 'decode_success';
+                }
+                if (colorProbe.summary) {
+                    const failed = Object.values(colorProbe.regions).some(v => v === 'failed');
+                    if (!failed) colorProbe.summary.worstCellsTop = [];
+                    recordNewColorColorProbe(colorProbe);
                 }
                 if (isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo)) break;
             }
