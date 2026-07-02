@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader99</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -982,6 +982,19 @@
         const NEW_COLOR_AMBIGUOUS_MARGIN = 35;
         const NEW_COLOR_AMBIGUOUS_VOTE_MARGIN = 1;
         const NEW_COLOR_WORST_CELL_LIMIT = 20;
+        // ★ 適応色分離（フレーム内キャリブレーション）用パラメータ
+        //   固定の理想色(255,0,0等)への絶対距離では、カメラ実測色（例: red≈240/130/90, yellow≈230/215/160）
+        //   とのマージンが崩壊するため、ファンクションパターンをアンカーにフレームごとに色セントロイドを適応させる。
+        const NEW_COLOR_AMBIGUOUS_REL_MARGIN = 0.20;        // セントロイド間距離に対する相対マージン閾値
+        const NEW_COLOR_CALIB_CONFIDENT_MARGIN = 55;        // 中間色シード採用に要する従来分類マージン
+        const NEW_COLOR_CALIB_MIN_SEED_CELLS = 8;           // 実測セントロイド採用に必要な確信セル数
+        const NEW_COLOR_CALIB_EM_ITERATIONS = 2;            // セントロイド適応の反復回数
+        const NEW_COLOR_CALIB_EM_UPDATE_MIN_MARGIN = 12;    // セントロイド更新に使うセルの最小マージン(L2)
+        const NEW_COLOR_CALIB_MIN_ANCHOR_DIST = 60;         // 黒白アンカー間の最小距離（未満はマッピング不良とみなす）
+        const NEW_COLOR_DEFER_DECODE_AMB_PCT = 0.12;        // 必要領域の曖昧セル率がこれ超なら復号を後回し
+        const NEW_COLOR_DEFER_DECODE_AMB_FLOOR = 20;        // 後回し判定の下限セル数
+        const NEW_COLOR_FLIP_RETRY_STEPS = [2, 4, 6, 8, 12, 16]; // 曖昧セル反転リトライの累積セル数
+        const NEW_COLOR_FLIP_RETRY_MAX_CELLS = 96;          // 反転リトライ対象の曖昧セル数上限
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -1861,12 +1874,16 @@
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
                         `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
-                        `thrMargin=${s.threshold ? s.threshold.margin : '-'} ${regionText} confusion=${confusion}`
+                        `thrMargin=${s.threshold ? s.threshold.margin : '-'}${s.threshold && s.threshold.rel !== undefined ? '/rel=' + s.threshold.rel : ''} ${regionText} confusion=${confusion}`
                     );
+                    if (s.calib) {
+                        lines.push(`    calib: ${s.calib}`);
+                    }
                     if (Array.isArray(s.worstCellsTop) && s.worstCellsTop.length) {
                         const worst = s.worstCellsTop.slice(0, 5).map(c => {
                             const rgb = c.rgb ? `${c.rgb.r}/${c.rgb.g}/${c.rgb.b}` : '-';
-                            return `(${c.r},${c.c}) ${c.bestColor}>${c.secondColor || '-'} m=${fmtNum(c.margin)} v=${c.vote} rgb=${rgb}${c.format ? ':fmt' : ''}`;
+                            const rel = Number.isFinite(c.rel) ? `/${fmtNum(c.rel)}` : '';
+                            return `(${c.r},${c.c}) ${c.bestColor}>${c.secondColor || '-'} m=${fmtNum(c.margin)}${rel} v=${c.vote} rgb=${rgb}${c.format ? ':fmt' : ''}`;
                         }).join(' | ');
                         lines.push(`    worstCells: ${worst}`);
                     }
@@ -6417,6 +6434,46 @@
             return null;
         }
 
+        // ★ 曖昧セル反転リトライ:
+        //   RS訂正能力(実測cap 9〜13)をわずかに超えて失敗する領域を、相対マージン最小
+        //   （＝最も疑わしい）の曖昧セルから累積的にビット反転して救済する。
+        //   対象は best/second の色が当該領域ビットを反転させるセルのみ。
+        function retryNewColorDecodeWithAmbiguousFlips(bits, cells, decoder, bitIndex, regionNo, decodeOptions) {
+            if (!bits || !bits.length || !Array.isArray(cells) || !cells.length) return null;
+            const flippable = [];
+            for (const cell of cells) {
+                if (!cell || !cell.ambiguous || !cell.secondState) continue;
+                if (!colorStateChangesBit(decoder, cell.state, cell.secondState, bitIndex)) continue;
+                flippable.push(cell);
+            }
+            if (flippable.length < 2 || flippable.length > NEW_COLOR_FLIP_RETRY_MAX_CELLS) return null;
+            // 分類器同士が割れたセルを優先し、次いで相対マージンの小さい順に反転
+            const flipKey = (cell) => {
+                const base = Number.isFinite(cell.relMargin)
+                    ? cell.relMargin
+                    : (Number.isFinite(cell.margin) ? cell.margin / 100 : 9999);
+                return cell.altDisagree ? base * 0.5 : base;
+            };
+            flippable.sort((a, b) => flipKey(a) - flipKey(b));
+            const n = bits.length;
+            const work = bits.map(row => row.slice());
+            let flipped = 0;
+            for (const step of NEW_COLOR_FLIP_RETRY_STEPS) {
+                const upto = Math.min(step, flippable.length);
+                if (upto <= flipped) continue;
+                for (; flipped < upto; flipped++) {
+                    const cell = flippable[flipped];
+                    if (cell.r >= 0 && cell.r < n && cell.c >= 0 && cell.c < n) {
+                        work[cell.r][cell.c] = !work[cell.r][cell.c];
+                    }
+                }
+                const qr = decodeNewColorBitMatrixQr(work, regionNo - 1, decodeOptions);
+                if (qr) return qr;
+                if (flipped >= flippable.length) break;
+            }
+            return null;
+        }
+
         function isRawNewColorAppEncCandidate(qr) {
             return !!(qr && qr.isRaw && qr.dataBytes && qr.dataBytes.length);
         }
@@ -6537,15 +6594,20 @@
                     bestColor: cell.state,
                     secondColor: cell.secondState,
                     margin,
+                    rel: Number.isFinite(cell.relMargin) ? cell.relMargin : null,
                     vote: cell.voteMargin,
                     rgb: cell.rgb,
                     format: fmt
                 });
             }
+            const worstKey = (w) => {
+                if (Number.isFinite(w.rel)) return w.rel;
+                return Number.isFinite(w.margin) ? w.margin / 100 : 999999;
+            };
             worst.sort((a, b) => {
-                const ma = Number.isFinite(a.margin) ? a.margin : 999999;
-                const mb = Number.isFinite(b.margin) ? b.margin : 999999;
-                if (ma !== mb) return ma - mb;
+                const ka = worstKey(a);
+                const kb = worstKey(b);
+                if (ka !== kb) return ka - kb;
                 return (a.vote || 0) - (b.vote || 0);
             });
             return {
@@ -6557,6 +6619,7 @@
                 avgMargin: marginCount ? marginSum / marginCount : null,
                 threshold: {
                     margin: NEW_COLOR_AMBIGUOUS_MARGIN,
+                    rel: NEW_COLOR_AMBIGUOUS_REL_MARGIN,
                     voteMargin: NEW_COLOR_AMBIGUOUS_VOTE_MARGIN
                 },
                 byRegion,
@@ -6565,6 +6628,439 @@
                     .slice(0, 6)
                     .map(([pair, count]) => ({ pair, count })),
                 worstCellsTop: worst.slice(0, NEW_COLOR_WORST_CELL_LIMIT)
+            };
+        }
+
+        // ★ 適応色分離: ファンクションパターンの既知セルをアンカーに使う。
+        //   QRツインは全領域が同一のファンクションパターンを共有するため、
+        //   位置検出・分離帯・タイミング・アライメント・暗モジュールのセルは
+        //   全ビット=1の色（通常black）／全ビット=0の色（通常white）で確定している。
+        const newColorFunctionAnchorCache = new Map();
+
+        function getNewColorAlignmentCenters(versionNumber) {
+            const table = {
+                2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34],
+                7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50]
+            };
+            return table[versionNumber] || null;
+        }
+
+        function getNewColorFunctionCellAnchors(n) {
+            if (newColorFunctionAnchorCache.has(n)) return newColorFunctionAnchorCache.get(n);
+            const darkIdx = [];
+            const lightIdx = [];
+            const version = (n - 17) / 4;
+            const idx = (r, c) => r * n + c;
+            // 位置検出パターン 7x7（外枠と中心3x3が暗、その間のリングが明）
+            const finderOrigins = [[0, 0], [0, n - 7], [n - 7, 0]];
+            for (const [fr, fc] of finderOrigins) {
+                for (let i = 0; i < 7; i++) {
+                    for (let j = 0; j < 7; j++) {
+                        const dark = (i === 0 || i === 6 || j === 0 || j === 6) || (i >= 2 && i <= 4 && j >= 2 && j <= 4);
+                        (dark ? darkIdx : lightIdx).push(idx(fr + i, fc + j));
+                    }
+                }
+            }
+            // 分離帯（全て明）
+            for (let k = 0; k <= 7; k++) {
+                lightIdx.push(idx(7, k), idx(k, 7));
+                lightIdx.push(idx(7, n - 8 + k), idx(k, n - 8));
+                lightIdx.push(idx(n - 8, k), idx(n - 8 + k, 7));
+            }
+            // タイミングパターン（偶数座標が暗）
+            for (let k = 8; k <= n - 9; k++) {
+                (k % 2 === 0 ? darkIdx : lightIdx).push(idx(6, k));
+                (k % 2 === 0 ? darkIdx : lightIdx).push(idx(k, 6));
+            }
+            // 暗モジュール (4v+9, 8) = (n-8, 8)
+            darkIdx.push(idx(n - 8, 8));
+            // アライメントパターン 5x5（外枠と中心が暗、中間リングが明）
+            const centers = getNewColorAlignmentCenters(version);
+            if (centers) {
+                for (const ar of centers) {
+                    for (const ac of centers) {
+                        if (ar <= 8 && ac <= 8) continue;
+                        if (ar <= 8 && ac >= n - 9) continue;
+                        if (ar >= n - 9 && ac <= 8) continue;
+                        for (let i = -2; i <= 2; i++) {
+                            for (let j = -2; j <= 2; j++) {
+                                const ring = Math.max(Math.abs(i), Math.abs(j));
+                                (ring === 2 || ring === 0 ? darkIdx : lightIdx).push(idx(ar + i, ac + j));
+                            }
+                        }
+                    }
+                }
+            }
+            const anchors = { darkIdx, lightIdx };
+            newColorFunctionAnchorCache.set(n, anchors);
+            return anchors;
+        }
+
+        function newColorHistogramMedian(hist, count) {
+            const half = count / 2;
+            let acc = 0;
+            for (let v = 0; v < 256; v++) {
+                acc += hist[v];
+                if (acc >= half) return v;
+            }
+            return 255;
+        }
+
+        function newColorRobustCentroid(cellRgb, hasSample, idxList) {
+            const histR = new Uint16Array(256);
+            const histG = new Uint16Array(256);
+            const histB = new Uint16Array(256);
+            let count = 0;
+            for (const cellIdx of idxList) {
+                if (!hasSample[cellIdx]) continue;
+                const base = cellIdx * 3;
+                histR[cellRgb[base]]++;
+                histG[cellRgb[base + 1]]++;
+                histB[cellRgb[base + 2]]++;
+                count++;
+            }
+            if (count < 4) return null;
+            return {
+                r: newColorHistogramMedian(histR, count),
+                g: newColorHistogramMedian(histG, count),
+                b: newColorHistogramMedian(histB, count),
+                count
+            };
+        }
+
+        function getNewColorAnchorNames(decoder, regionCount) {
+            const bitCount = Math.max(1, (regionCount || 3) - 1);
+            let darkName = null;
+            let lightName = null;
+            for (const name of decoder.candidates) {
+                const bits = decoder.states[name] || [];
+                let allOne = true;
+                let allZero = true;
+                for (let i = 0; i < bitCount; i++) {
+                    if (bits[i]) allZero = false; else allOne = false;
+                }
+                if (allOne && !darkName) darkName = name;
+                if (allZero && !lightName) lightName = name;
+            }
+            return { darkName, lightName };
+        }
+
+        // ★ フレーム内キャリブレーション本体:
+        //   1) ファンクションパターンから黒白アンカーの実測セントロイドを取得
+        //   2) 従来分類の高確信セルから中間色（red/yellow等）の実測シードを取得
+        //      （不足時は黒白アンカーから推定した照明ゲインで理想色を写像）
+        //   3) EM反復で全セルからセントロイドを適応（黒白はアンカー固定）
+        //   戻り値の classifyRgb は最近傍セントロイド分類と
+        //   「セントロイド間距離に対する相対マージン」を返す。
+        function buildNewColorAdaptiveCalibration(cellRgb, hasSample, n, decoder, regionCount) {
+            const candidates = decoder && decoder.candidates ? decoder.candidates : null;
+            if (!cellRgb || !candidates || candidates.length < 2) return null;
+            const { darkName, lightName } = getNewColorAnchorNames(decoder, regionCount);
+            if (!darkName || !lightName) return null;
+            const anchors = getNewColorFunctionCellAnchors(n);
+            const darkAnchor = newColorRobustCentroid(cellRgb, hasSample, anchors.darkIdx);
+            const lightAnchor = newColorRobustCentroid(cellRgb, hasSample, anchors.lightIdx);
+            if (!darkAnchor || !lightAnchor) return null;
+            const anchorDist = Math.hypot(
+                lightAnchor.r - darkAnchor.r,
+                lightAnchor.g - darkAnchor.g,
+                lightAnchor.b - darkAnchor.b
+            );
+            // アンカーが分離していない＝マッピング不良。適応せず従来分類に任せる。
+            if (anchorDist < NEW_COLOR_CALIB_MIN_ANCHOR_DIST) return null;
+
+            const total = n * n;
+            const centroids = {};
+            centroids[darkName] = [darkAnchor.r, darkAnchor.g, darkAnchor.b];
+            centroids[lightName] = [lightAnchor.r, lightAnchor.g, lightAnchor.b];
+
+            const gain = [
+                Math.max(0.05, (lightAnchor.r - darkAnchor.r) / 255),
+                Math.max(0.05, (lightAnchor.g - darkAnchor.g) / 255),
+                Math.max(0.05, (lightAnchor.b - darkAnchor.b) / 255)
+            ];
+            const middleNames = candidates.filter(name => name !== darkName && name !== lightName);
+
+            // 中間色シード: 従来分類の高確信セルの実測メディアン
+            const seedBuckets = new Map();
+            for (const name of middleNames) {
+                seedBuckets.set(name, {
+                    h: [new Uint16Array(256), new Uint16Array(256), new Uint16Array(256)],
+                    count: 0
+                });
+            }
+            if (middleNames.length) {
+                for (let cellIdx = 0; cellIdx < total; cellIdx++) {
+                    if (!hasSample[cellIdx]) continue;
+                    const base = cellIdx * 3;
+                    const r = cellRgb[base];
+                    const g = cellRgb[base + 1];
+                    const b = cellRgb[base + 2];
+                    const detail = classifyNamedColorSampleDetailed(r, g, b, candidates);
+                    if (!detail || !seedBuckets.has(detail.best)) continue;
+                    if (!Number.isFinite(detail.margin) || detail.margin < NEW_COLOR_CALIB_CONFIDENT_MARGIN) continue;
+                    const bucket = seedBuckets.get(detail.best);
+                    bucket.h[0][r]++;
+                    bucket.h[1][g]++;
+                    bucket.h[2][b]++;
+                    bucket.count++;
+                }
+            }
+            for (const name of middleNames) {
+                const bucket = seedBuckets.get(name);
+                if (bucket && bucket.count >= NEW_COLOR_CALIB_MIN_SEED_CELLS) {
+                    centroids[name] = [
+                        newColorHistogramMedian(bucket.h[0], bucket.count),
+                        newColorHistogramMedian(bucket.h[1], bucket.count),
+                        newColorHistogramMedian(bucket.h[2], bucket.count)
+                    ];
+                } else {
+                    const ideal = getColorProfile(name);
+                    centroids[name] = [
+                        Math.min(255, darkAnchor.r + gain[0] * ideal.r),
+                        Math.min(255, darkAnchor.g + gain[1] * ideal.g),
+                        Math.min(255, darkAnchor.b + gain[2] * ideal.b)
+                    ];
+                }
+            }
+
+            // EM反復: 最近傍割当て → 中間色セントロイドを実測メディアンで更新（黒白はアンカー固定）
+            for (let iter = 0; iter < NEW_COLOR_CALIB_EM_ITERATIONS && middleNames.length; iter++) {
+                const update = new Map();
+                for (const name of middleNames) {
+                    update.set(name, {
+                        h: [new Uint16Array(256), new Uint16Array(256), new Uint16Array(256)],
+                        count: 0
+                    });
+                }
+                for (let cellIdx = 0; cellIdx < total; cellIdx++) {
+                    if (!hasSample[cellIdx]) continue;
+                    const base = cellIdx * 3;
+                    const r = cellRgb[base];
+                    const g = cellRgb[base + 1];
+                    const b = cellRgb[base + 2];
+                    let bestName = null;
+                    let bestD = Infinity;
+                    let secondD = Infinity;
+                    for (const name of candidates) {
+                        const c = centroids[name];
+                        const d = (r - c[0]) * (r - c[0]) + (g - c[1]) * (g - c[1]) + (b - c[2]) * (b - c[2]);
+                        if (d < bestD) {
+                            secondD = bestD;
+                            bestD = d;
+                            bestName = name;
+                        } else if (d < secondD) {
+                            secondD = d;
+                        }
+                    }
+                    const bucket = update.get(bestName);
+                    if (!bucket) continue;
+                    // 境界セルは更新から除外（セントロイドのドリフト防止）
+                    if (Math.sqrt(secondD) - Math.sqrt(bestD) < NEW_COLOR_CALIB_EM_UPDATE_MIN_MARGIN) continue;
+                    bucket.h[0][r]++;
+                    bucket.h[1][g]++;
+                    bucket.h[2][b]++;
+                    bucket.count++;
+                }
+                for (const name of middleNames) {
+                    const bucket = update.get(name);
+                    if (bucket && bucket.count >= NEW_COLOR_CALIB_MIN_SEED_CELLS) {
+                        centroids[name] = [
+                            newColorHistogramMedian(bucket.h[0], bucket.count),
+                            newColorHistogramMedian(bucket.h[1], bucket.count),
+                            newColorHistogramMedian(bucket.h[2], bucket.count)
+                        ];
+                    }
+                }
+            }
+
+            // 相対マージン算出用のペア間距離
+            const centroidArr = candidates.map(name => ({ name, c: centroids[name] }));
+            const pairDist = new Map();
+            for (let i = 0; i < centroidArr.length; i++) {
+                for (let j = i + 1; j < centroidArr.length; j++) {
+                    const a = centroidArr[i];
+                    const b = centroidArr[j];
+                    const d = Math.max(1, Math.hypot(a.c[0] - b.c[0], a.c[1] - b.c[1], a.c[2] - b.c[2]));
+                    pairDist.set(a.name + '|' + b.name, d);
+                    pairDist.set(b.name + '|' + a.name, d);
+                }
+            }
+
+            const classifyRgb = (r, g, b) => {
+                let bestName = null;
+                let secondName = null;
+                let bestD = Infinity;
+                let secondD = Infinity;
+                for (const item of centroidArr) {
+                    const c = item.c;
+                    const d = (r - c[0]) * (r - c[0]) + (g - c[1]) * (g - c[1]) + (b - c[2]) * (b - c[2]);
+                    if (d < bestD) {
+                        secondD = bestD;
+                        secondName = bestName;
+                        bestD = d;
+                        bestName = item.name;
+                    } else if (d < secondD) {
+                        secondD = d;
+                        secondName = item.name;
+                    }
+                }
+                const margin = (secondName !== null && Number.isFinite(secondD))
+                    ? (Math.sqrt(secondD) - Math.sqrt(bestD))
+                    : Infinity;
+                const relMargin = (secondName !== null)
+                    ? margin / (pairDist.get(bestName + '|' + secondName) || 441.7)
+                    : Infinity;
+                return { best: bestName || 'white', second: secondName, margin, relMargin };
+            };
+
+            const nearestName = (r, g, b) => {
+                let bestName = null;
+                let bestD = Infinity;
+                for (const item of centroidArr) {
+                    const c = item.c;
+                    const d = (r - c[0]) * (r - c[0]) + (g - c[1]) * (g - c[1]) + (b - c[2]) * (b - c[2]);
+                    if (d < bestD) {
+                        bestD = d;
+                        bestName = item.name;
+                    }
+                }
+                return bestName || 'white';
+            };
+
+            return {
+                centroids,
+                classifyRgb,
+                nearestName,
+                calibDebug: candidates.map(name =>
+                    name.slice(0, 3) + ':' + centroids[name].map(v => Math.round(v)).join('/')
+                ).join(' ') + ` ancDk=${darkAnchor.count} ancLt=${lightAnchor.count} ancDist=${Math.round(anchorDist)}`
+            };
+        }
+
+        // ★ 判別軸ベースの階層分類（アンサンブル用の第2分類器）:
+        //   大分類（暗ペア/明ペア）→ ペア内分割 の2段階を、各ペアの理想色差が最大のチャネルで行う。
+        //   閾値はアンカー拘束付きOtsu。合成評価ではEM適応が苦手な「彩度低下・にじみ大」の
+        //   フレームで誤分類がEM比 約1/2〜1/3 に減る（通常条件はEMが優位のため両輪で使う）。
+        function newColorOtsuThreshold(hist, lo, hi) {
+            let total = 0;
+            let totalSum = 0;
+            for (let v = 0; v < 256; v++) {
+                total += hist[v];
+                totalSum += v * hist[v];
+            }
+            if (total < 8) return null;
+            let bestT = null;
+            let bestVar = -1;
+            let w0 = 0;
+            let sum0 = 0;
+            for (let t = 0; t < 255; t++) {
+                w0 += hist[t];
+                sum0 += t * hist[t];
+                if (t < lo || t > hi) continue;
+                const w1 = total - w0;
+                if (w0 < 4 || w1 < 4) continue;
+                const m0 = sum0 / w0;
+                const m1 = (totalSum - sum0) / w1;
+                const between = w0 * w1 * (m0 - m1) * (m0 - m1);
+                if (between > bestVar) {
+                    bestVar = between;
+                    bestT = t + 0.5;
+                }
+            }
+            if (bestT === null && lo <= hi) bestT = (lo + hi) / 2;
+            return bestT;
+        }
+
+        function buildNewColorAxisClassifier(cellRgb, hasSample, n, decoder, regionCount) {
+            const candidates = decoder && decoder.candidates ? decoder.candidates : null;
+            if (!cellRgb || !candidates || candidates.length !== 4) return null;
+            const { darkName, lightName } = getNewColorAnchorNames(decoder, regionCount);
+            // 分割方向の反転を避けるため、黒白アンカーを持つ標準系パレットのみ対象
+            if (darkName !== 'black' || lightName !== 'white') return null;
+            let darkMid = null;
+            let lightMid = null;
+            for (const name of candidates) {
+                if (name === darkName || name === lightName) continue;
+                const bits = decoder.states[name] || [];
+                if (bits[0]) {
+                    if (!darkMid) darkMid = name;
+                } else if (!lightMid) {
+                    lightMid = name;
+                }
+            }
+            if (!darkMid || !lightMid) return null;
+            const anchors = getNewColorFunctionCellAnchors(n);
+            const darkAnchor = newColorRobustCentroid(cellRgb, hasSample, anchors.darkIdx);
+            const lightAnchor = newColorRobustCentroid(cellRgb, hasSample, anchors.lightIdx);
+            if (!darkAnchor || !lightAnchor) return null;
+            const anchorDark = [darkAnchor.r, darkAnchor.g, darkAnchor.b];
+            const anchorLight = [lightAnchor.r, lightAnchor.g, lightAnchor.b];
+
+            const idealOf = (name) => {
+                const p = getColorProfile(name);
+                return [p.r, p.g, p.b];
+            };
+            const argmaxCh = (d) => (d[0] >= d[1] && d[0] >= d[2]) ? 0 : (d[1] >= d[2] ? 1 : 2);
+            const iDark = idealOf(darkName);
+            const iDarkMid = idealOf(darkMid);
+            const iLight = idealOf(lightName);
+            const iLightMid = idealOf(lightMid);
+
+            // 大分類軸: 暗ペア理想平均と明ペア理想平均の差が最大のチャネル（標準パレットではG）
+            const groupDiff = [0, 1, 2].map(ch =>
+                Math.abs((iLight[ch] + iLightMid[ch]) / 2 - (iDark[ch] + iDarkMid[ch]) / 2));
+            const groupCh = argmaxCh(groupDiff);
+            if (anchorLight[groupCh] - anchorDark[groupCh] < 40) return null;
+
+            // 暗ペア軸: 理想差最大チャネルの生値（黒/赤ならR。級間ギャップが照明変動より十分大きい）
+            const darkDiff = [0, 1, 2].map(ch => Math.abs(iDark[ch] - iDarkMid[ch]));
+            const darkCh = argmaxCh(darkDiff);
+            // 明ペア軸: 理想差最大チャネル − 共有チャネル（黄/白ならB−R相当。照明の同相変動を打ち消す）
+            const lightDiff = [0, 1, 2].map(ch => Math.abs(iLight[ch] - iLightMid[ch]));
+            const lightCh = argmaxCh(lightDiff);
+            let lightRef = lightCh === 0 ? 1 : 0;
+            let refBest = Infinity;
+            for (let ch = 0; ch < 3; ch++) {
+                if (ch === lightCh) continue;
+                if (lightDiff[ch] < refBest) {
+                    refBest = lightDiff[ch];
+                    lightRef = ch;
+                }
+            }
+            const clamp8 = (v) => v < 0 ? 0 : (v > 255 ? 255 : v);
+            const lightAxisValue = (base) => clamp8(cellRgb[base + lightCh] - cellRgb[base + lightRef] + 128);
+
+            const total = n * n;
+            const histGroup = new Uint32Array(256);
+            for (let i = 0; i < total; i++) {
+                if (hasSample[i]) histGroup[cellRgb[i * 3 + groupCh]]++;
+            }
+            const tGroup = newColorOtsuThreshold(histGroup, anchorDark[groupCh] + 8, anchorLight[groupCh] - 8);
+            if (tGroup === null) return null;
+            const histDark = new Uint32Array(256);
+            const histLight = new Uint32Array(256);
+            for (let i = 0; i < total; i++) {
+                if (!hasSample[i]) continue;
+                const base = i * 3;
+                if (cellRgb[base + groupCh] < tGroup) histDark[cellRgb[base + darkCh]]++;
+                else histLight[lightAxisValue(base)]++;
+            }
+            const lightAnchorAxis = clamp8(anchorLight[lightCh] - anchorLight[lightRef] + 128);
+            const tDark = newColorOtsuThreshold(histDark, anchorDark[darkCh] + 5, 250);
+            const tLight = newColorOtsuThreshold(histLight, 5, lightAnchorAxis - 3);
+            if (tDark === null || tLight === null) return null;
+
+            const chName = ['R', 'G', 'B'];
+            return {
+                classifyIdx: (cellIdx) => {
+                    const base = cellIdx * 3;
+                    if (cellRgb[base + groupCh] < tGroup) {
+                        return cellRgb[base + darkCh] < tDark ? darkName : darkMid;
+                    }
+                    return lightAxisValue(base) < tLight ? lightMid : lightName;
+                },
+                debug: `axis[${chName[groupCh]}<${Math.round(tGroup)} ${chName[darkCh]}<${Math.round(tDark)} ${chName[lightCh]}-${chName[lightRef]}<${Math.round(tLight)}]`
             };
         }
 
@@ -6581,84 +7077,142 @@
                 { dx: 0, dy: -0.18, weight: 1 },
                 { dx: 0, dy: 0.18, weight: 1 }
             ];
-            const states = new Array(n);
-            const cells = colorProbe ? [] : null;
+            const total = n * n;
+
+            // ─ パス1: 全セルのRGB収集。セル代表色は中心加重メディアン
+            //   （モジュール境界のにじみ・色収差サンプルを外れ値として排除）─
+            const cellRgb = new Uint8Array(total * 3);
+            const hasSample = new Uint8Array(total);
+            const cellSamples = new Array(total);
+            const chR = [];
+            const chG = [];
+            const chB = [];
             for (let r = 0; r < n; r++) {
-                states[r] = new Array(n);
                 for (let c = 0; c < n; c++) {
-                    const votes = new Map();
-                    const sampleDetails = [];
-                    let rgbSum = { r: 0, g: 0, b: 0, count: 0 };
+                    const cellIdx = r * n + c;
+                    let samples = null;
+                    chR.length = 0;
+                    chG.length = 0;
+                    chB.length = 0;
                     for (const probe of probeOffsets) {
                         const p = locationInfo.mappingFunction(c + 0.5 + probe.dx, r + 0.5 + probe.dy);
                         if (!p || p.x < 0 || p.y < 0 || p.x >= width || p.y >= height) continue;
                         const rgb = averageRgbSample(src, width, height, p.x, p.y, radius);
-                        const detail = classifyNamedColorSampleDetailed(rgb.r, rgb.g, rgb.b, decoder.candidates);
-                        const state = detail.best;
-                        votes.set(state, (votes.get(state) || 0) + probe.weight);
-                        sampleDetails.push({ ...detail, weight: probe.weight, rgb });
-                        rgbSum.r += rgb.r;
-                        rgbSum.g += rgb.g;
-                        rgbSum.b += rgb.b;
-                        rgbSum.count++;
+                        if (!samples) samples = [];
+                        samples.push({ rgb, weight: probe.weight });
+                        for (let w = 0; w < probe.weight; w++) {
+                            chR.push(rgb.r);
+                            chG.push(rgb.g);
+                            chB.push(rgb.b);
+                        }
                     }
-                    if (!votes.size) {
+                    cellSamples[cellIdx] = samples;
+                    if (!samples) continue;
+                    chR.sort((a, b) => a - b);
+                    chG.sort((a, b) => a - b);
+                    chB.sort((a, b) => a - b);
+                    const mid = chR.length >> 1;
+                    const base = cellIdx * 3;
+                    cellRgb[base] = chR[mid];
+                    cellRgb[base + 1] = chG[mid];
+                    cellRgb[base + 2] = chB[mid];
+                    hasSample[cellIdx] = 1;
+                }
+            }
+
+            // ─ フレーム内キャリブレーション（失敗時は従来の固定プロファイル分類にフォールバック）─
+            const regionCount = (colorProbe && colorProbe.regionCount) || 3;
+            const calibration = buildNewColorAdaptiveCalibration(cellRgb, hasSample, n, decoder, regionCount);
+            const classifyCell = calibration
+                ? calibration.classifyRgb
+                : (r, g, b) => classifyNamedColorSampleDetailed(r, g, b, decoder.candidates);
+            const nearestState = calibration
+                ? calibration.nearestName
+                : (r, g, b) => classifyNamedColorSample(r, g, b, decoder.candidates);
+
+            // ─ 第2分類器（判別軸ベース）: 主分類との不一致セル＝最有力の疑いセルとして扱い、
+            //   復号失敗時の代替ビット行列にも使う ─
+            const axisClassifier = buildNewColorAxisClassifier(cellRgb, hasSample, n, decoder, regionCount);
+            const altStates = axisClassifier ? new Array(n) : null;
+            let altDisagreeCount = 0;
+
+            // ─ パス2: 分類・プローブ投票・曖昧セル記録 ─
+            const states = new Array(n);
+            const cells = colorProbe ? [] : null;
+            for (let r = 0; r < n; r++) {
+                states[r] = new Array(n);
+                if (altStates) altStates[r] = new Array(n);
+                for (let c = 0; c < n; c++) {
+                    const cellIdx = r * n + c;
+                    const samples = cellSamples[cellIdx];
+                    if (!hasSample[cellIdx] || !samples || !samples.length) {
                         states[r][c] = 'white';
+                        if (altStates) altStates[r][c] = 'white';
                         if (cells) {
                             cells.push({
-                                r, c, state: 'white', secondState: null, margin: 0, voteMargin: 0,
-                                ambiguous: true, rgb: { r: 255, g: 255, b: 255 }
+                                r, c, state: 'white', secondState: null, margin: 0, relMargin: 0,
+                                voteMargin: 0, ambiguous: true, altDisagree: false, rgb: { r: 255, g: 255, b: 255 }
                             });
                         }
                         continue;
                     }
-                    let bestState = decoder.candidates[0] || 'white';
-                    let bestWeight = -1;
-                    let secondState = null;
-                    let secondWeight = -1;
-                    for (const [state, weight] of votes.entries()) {
-                        if (weight > bestWeight) {
-                            secondState = bestState;
-                            secondWeight = bestWeight;
-                            bestWeight = weight;
-                            bestState = state;
-                        } else if (weight > secondWeight) {
-                            secondWeight = weight;
-                            secondState = state;
+                    const base = cellIdx * 3;
+                    const detail = classifyCell(cellRgb[base], cellRgb[base + 1], cellRgb[base + 2]);
+                    const state = detail.best || 'white';
+                    states[r][c] = state;
+                    const altName = axisClassifier ? axisClassifier.classifyIdx(cellIdx) : null;
+                    if (altStates) altStates[r][c] = altName || state;
+                    const altDisagree = !!(altName && altName !== state);
+                    if (altDisagree) altDisagreeCount++;
+                    if (!cells) continue;
+                    // プローブ投票（サブモジュールずれ・にじみの検知用）
+                    const votes = new Map();
+                    for (const s of samples) {
+                        const name = nearestState(s.rgb.r, s.rgb.g, s.rgb.b);
+                        votes.set(name, (votes.get(name) || 0) + s.weight);
+                    }
+                    let bestVote = 0;
+                    let secondVote = 0;
+                    for (const [name, weight] of votes.entries()) {
+                        if (name === state) {
+                            bestVote = weight;
+                        } else if (weight > secondVote) {
+                            secondVote = weight;
                         }
                     }
-                    states[r][c] = bestState;
-                    if (cells) {
-                        let minDetail = null;
-                        for (const d of sampleDetails) {
-                            if (!minDetail || (Number.isFinite(d.margin) ? d.margin : Infinity) < (Number.isFinite(minDetail.margin) ? minDetail.margin : Infinity)) {
-                                minDetail = d;
-                            }
-                        }
-                        if (!secondState || secondWeight < 0) secondState = minDetail ? minDetail.second : null;
-                        const margin = minDetail ? minDetail.margin : Infinity;
-                        const voteMargin = bestWeight - Math.max(0, secondWeight);
-                        cells.push({
-                            r,
-                            c,
-                            state: bestState,
-                            secondState,
-                            margin,
-                            voteMargin,
-                            ambiguous: (Number.isFinite(margin) && margin <= NEW_COLOR_AMBIGUOUS_MARGIN) ||
-                                voteMargin <= NEW_COLOR_AMBIGUOUS_VOTE_MARGIN ||
-                                votes.size > 1,
-                            rgb: rgbSum.count ? {
-                                r: Math.round(rgbSum.r / rgbSum.count),
-                                g: Math.round(rgbSum.g / rgbSum.count),
-                                b: Math.round(rgbSum.b / rgbSum.count)
-                            } : null
-                        });
-                    }
+                    const voteMargin = bestVote - secondVote;
+                    const margin = Number.isFinite(detail.margin) ? detail.margin : Infinity;
+                    const relMargin = Number.isFinite(detail.relMargin) ? detail.relMargin : null;
+                    const ambiguous = (relMargin !== null
+                        ? relMargin <= NEW_COLOR_AMBIGUOUS_REL_MARGIN
+                        : (Number.isFinite(margin) && margin <= NEW_COLOR_AMBIGUOUS_MARGIN))
+                        || voteMargin <= NEW_COLOR_AMBIGUOUS_VOTE_MARGIN
+                        || altDisagree;
+                    cells.push({
+                        r,
+                        c,
+                        state,
+                        // 分類器同士が割れたセルは、独立した証拠である第2分類器の答えを反転先に採用
+                        secondState: altDisagree ? altName : (detail.second || null),
+                        margin,
+                        relMargin,
+                        voteMargin,
+                        ambiguous,
+                        altDisagree,
+                        rgb: { r: cellRgb[base], g: cellRgb[base + 1], b: cellRgb[base + 2] }
+                    });
                 }
             }
             if (colorProbe) {
                 colorProbe.summary = summarizeNewColorCellProbe(cells, decoder, n, colorProbe.regionCount || 3);
+                if (colorProbe.summary) {
+                    const calibParts = [];
+                    if (calibration) calibParts.push(calibration.calibDebug);
+                    if (axisClassifier) calibParts.push(axisClassifier.debug + ` dis=${altDisagreeCount}`);
+                    if (calibParts.length) colorProbe.summary.calib = calibParts.join(' ');
+                }
+                colorProbe._cells = cells;
+                colorProbe._altStates = (altStates && altDisagreeCount > 0) ? altStates : null;
             }
             return states;
         }
@@ -6761,7 +7315,13 @@
             colorLocations = colorLocations
                 .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, shiftedBounds) }))
                 .filter(item => item.loc && !item.rank.reject)
-                .sort((a, b) => b.rank.score - a.rank.score)
+                .sort((a, b) => {
+                    if (b.rank.score !== a.rank.score) return b.rank.score - a.rank.score;
+                    // ログ実測では alignFixed=1（アライメント位置強制）の候補が高確率で復号成功するため優先
+                    const aFixed = a.loc.probeMeta && a.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
+                    const bFixed = b.loc.probeMeta && b.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
+                    return bFixed - aFixed;
+                })
                 .map(item => item.loc);
 
             const regionDecodeOptions = (regionNo, locInfo) => {
@@ -6789,7 +7349,65 @@
                 };
             };
 
-            for (let locIdx = 0; locIdx < colorLocations.length; locIdx++) {
+            // ─ 候補1件分の復号試行（失敗時は曖昧セル反転リトライ付き）─
+            const attemptCandidateDecode = (cand) => {
+                const locInfo = cand.locInfo;
+                const colorProbe = cand.colorProbe;
+                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) {
+                        colorProbe.regions[String(regionNo)] = 'already_acquired';
+                        continue;
+                    }
+                    const bitIndex = regionNo - 2;
+                    const bits = buildBitMatrixFromColorStates(cand.states, decoder.states, bitIndex);
+                    let qrMatrix = decodeNewColorBitMatrixQr(bits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
+                    if (!qrMatrix && cand.cells && cand.cells.length) {
+                        qrMatrix = retryNewColorDecodeWithAmbiguousFlips(bits, cand.cells, decoder, bitIndex, regionNo, regionDecodeOptions(regionNo, locInfo));
+                    }
+                    if (!qrMatrix && cand.altStates) {
+                        // 第2分類器（判別軸ベース）のビット行列で再試行。
+                        // 彩度低下・にじみの大きいフレームでは主分類より誤りが少ないことがある。
+                        const altBits = buildBitMatrixFromColorStates(cand.altStates, decoder.states, bitIndex);
+                        qrMatrix = decodeNewColorBitMatrixQr(altBits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
+                    }
+                    if (!qrMatrix) {
+                        colorProbe.regions[String(regionNo)] = 'failed';
+                        continue;
+                    }
+                    qrMatrix.location = locInfo.location;
+                    qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
+                    storeNewColorRegionDecode(result, regionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
+                    colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : 'decode_success';
+                }
+                if (colorProbe.summary) {
+                    const failed = Object.values(colorProbe.regions).some(v => v === 'failed');
+                    if (!failed) colorProbe.summary.worstCellsTop = [];
+                    recordNewColorColorProbe(colorProbe);
+                }
+                return isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
+            };
+
+            // 未取得領域の平均曖昧セル数（候補の見込み品質。小さいほど復号成功しやすい）
+            const neededRegionAmbiguity = (colorProbe) => {
+                if (!colorProbe.summary || !colorProbe.summary.byRegion) return Infinity;
+                let sum = 0;
+                let counted = 0;
+                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) continue;
+                    const bucket = colorProbe.summary.byRegion[String(regionNo)];
+                    if (!bucket) return Infinity;
+                    sum += bucket.ambiguous;
+                    counted++;
+                }
+                return counted ? sum / counted : Infinity;
+            };
+
+            // ─ フェーズA: 各候補を分類し、曖昧セルが少ない候補は即復号。
+            //   曖昧の多い候補（従来は総当たりでRS失敗の山を作っていた）は後回しにする。─
+            // ─ フェーズB: 残候補を曖昧セル数の昇順で復号。─
+            const deferred = [];
+            let stageComplete = isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
+            for (let locIdx = 0; locIdx < colorLocations.length && !stageComplete; locIdx++) {
                 const locInfo = colorLocations[locIdx];
                 const colorProbe = {
                     phase: 'newColor color-classify',
@@ -6807,29 +7425,27 @@
                 };
                 const sampledStates = sampleNewColorDisplayStatesFromLocation(imageData.data, width, height, locInfo, decoder, colorProbe);
                 if (!sampledStates) continue;
-                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
-                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) {
-                        colorProbe.regions[String(regionNo)] = 'already_acquired';
-                        continue;
-                    }
-                    const bitIndex = regionNo - 2;
-                    const bits = buildBitMatrixFromColorStates(sampledStates, decoder.states, bitIndex);
-                    const qrMatrix = decodeNewColorBitMatrixQr(bits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
-                    if (!qrMatrix) {
-                        colorProbe.regions[String(regionNo)] = 'failed';
-                        continue;
-                    }
-                    qrMatrix.location = locInfo.location;
-                    qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
-                    storeNewColorRegionDecode(result, regionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
-                    colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : 'decode_success';
+                const cells = colorProbe._cells || null;
+                const altStates = colorProbe._altStates || null;
+                delete colorProbe._cells;
+                delete colorProbe._altStates;
+                const cand = { locInfo, states: sampledStates, cells, altStates, colorProbe };
+                const dim = locInfo.dimension || 0;
+                const ambAvg = neededRegionAmbiguity(colorProbe);
+                const deferLimit = Math.max(NEW_COLOR_DEFER_DECODE_AMB_FLOOR, dim * dim * NEW_COLOR_DEFER_DECODE_AMB_PCT);
+                if (Number.isFinite(ambAvg) && ambAvg <= deferLimit) {
+                    stageComplete = attemptCandidateDecode(cand);
+                } else {
+                    cand.ambAvg = ambAvg;
+                    deferred.push(cand);
                 }
-                if (colorProbe.summary) {
-                    const failed = Object.values(colorProbe.regions).some(v => v === 'failed');
-                    if (!failed) colorProbe.summary.worstCellsTop = [];
-                    recordNewColorColorProbe(colorProbe);
+            }
+            if (!stageComplete && deferred.length) {
+                deferred.sort((a, b) => (Number.isFinite(a.ambAvg) ? a.ambAvg : Infinity) - (Number.isFinite(b.ambAvg) ? b.ambAvg : Infinity));
+                for (const cand of deferred) {
+                    stageComplete = attemptCandidateDecode(cand);
+                    if (stageComplete) break;
                 }
-                if (isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo)) break;
             }
 
             if (q1Data.mgmtInfo && q1Data.mgmtInfo.dataCompBits === 0 && result.qr3 && q1Data.text && result.qr3 === q1Data.text) {
