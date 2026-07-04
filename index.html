@@ -24,7 +24,7 @@
         
         .camera-container { position: relative; width: 100%; flex: 1; background-color: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; }
         #camera { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 1; }
-        #overlayCanvas { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 2; }
+        #overlayCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 2; }
         #zxingCanvas { display: none; }
         
         #cameraControls { position: absolute; bottom: 30px; left: 0; width: 100%; z-index: 50; display: none; justify-content: center; gap: 15px; pointer-events: none; }
@@ -98,16 +98,6 @@
             flex-direction: column;
             gap: 8px;
         }
-        #orientationBtn,
-        .mode-btns button[onclick="copyAllDebugLog()"],
-        .mode-btns button[onclick="confirmClearDebugLog()"],
-        #debugLogCountLabel,
-        #scanStatsCard,
-        #newColorScanStatsCard,
-        #timeoutScreen,
-        #debugClearModal {
-            display: none !important;
-        }
         
         .enc-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; }
         .enc-badge.sys { background: rgba(255,111,0,0.2); color: #FF6F00; border: 1px solid rgba(255,111,0,0.4); }
@@ -116,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader39</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -911,7 +901,7 @@
         }
 
         // ★ 20秒タイムアウト：QRツイン読取開始から20秒で打ち切り、取得済み情報でデバッグ表示＆蓄積。
-        const SCAN_TIMEOUT_MS = Infinity;
+        const SCAN_TIMEOUT_MS = 20000;
         let twinReadStartedAt = 0;     // 読取開始時刻(perf ms)。resetScanDebugStatsで0化→scanLoop初回で設定。
         let lastTimeoutTrialId = null; // 直近タイムアウト試行の蓄積レコードID（コメント追記用）
 
@@ -1233,7 +1223,6 @@
 
         // --- 描画関数 ---
         const drawLine = (begin, end, color) => {
-            return;
             ctx.beginPath();
             ctx.moveTo(begin.x, begin.y);
             ctx.lineTo(end.x, end.y);
@@ -1243,7 +1232,6 @@
         };
 
         const drawBoundingBox = (points, color) => {
-            return;
             if (!points || points.length !== 4) return;
             drawLine(points[0], points[1], color);
             drawLine(points[1], points[2], color);
@@ -1252,7 +1240,6 @@
         };
 
         function markJsQrCropRect(sx, sy, sw, sh, label = 'jsQR crop') {
-            return;
             if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(sw) || !Number.isFinite(sh)) return;
             if (sw <= 0 || sh <= 0) return;
             recordJsQrInput(label, 'crop');
@@ -2093,17 +2080,13 @@
         //    「デバッグログコピー」で全件コピー、「デバッグログ削除」で消去。
         // ============================================================
         const DEBUG_LOG_KEY = 'QR_DEBUG_LOG_V1';
-        try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
         const DEBUG_LOG_MAX = 500; // 上限件数（古いものから破棄）
 
         function loadDebugLog() {
-            return [];
             try { const s = localStorage.getItem(DEBUG_LOG_KEY); return s ? (JSON.parse(s) || []) : []; }
             catch (e) { return []; }
         }
         function saveDebugLog(arr) {
-            try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) { /* ignore */ }
-            return;
             try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(arr)); } catch (e) { /* quota等は無視 */ }
         }
         function getDebugLogCount() { return loadDebugLog().length; }
@@ -2117,11 +2100,6 @@
         // 完了画面表示 or 20秒タイムアウト時に呼ぶ。二重追記は _logged フラグで防止。
         // 返り値: 追記したレコードのID（スキップ時は null）。
         function appendCurrentTrialToLog() {
-            {
-                const stats = getScanDebugStats();
-                if (stats) stats._logged = true;
-            }
-            return null;
             const stats = getScanDebugStats();
             if (!stats || stats._logged) return null;
             const isTimeout = !!stats._timeout;
@@ -2305,25 +2283,8 @@
         // 起動時に蓄積件数・読取向きボタンを初期化
         try { updateDebugLogCountUI(); updateOrientationBtnUI(); } catch (e) { /* DOM未準備なら load で */ }
         window.addEventListener('load', function () { try { updateDebugLogCountUI(); updateOrientationBtnUI(); } catch (e) {} });
-        window.addEventListener('load', function () {
-            try {
-                document.getElementById('orientationBtn')?.remove();
-                document.getElementById('debugLogCountLabel')?.remove();
-                document.querySelectorAll('button[onclick="copyAllDebugLog()"], button[onclick="confirmClearDebugLog()"]').forEach(btn => {
-                    const parent = btn.parentElement;
-                    btn.remove();
-                    if (parent && parent.children.length === 0) parent.remove();
-                });
-                document.getElementById('scanStatsCard')?.remove();
-                document.getElementById('newColorScanStatsCard')?.remove();
-                document.getElementById('debugClearModal')?.remove();
-                document.getElementById('timeoutScreen')?.remove();
-                localStorage.removeItem(DEBUG_LOG_KEY);
-            } catch (e) { /* ignore */ }
-        });
 
         function drawJsQrCropDebugRects() {
-            return;
             const now = Date.now();
             jsQrCropDebugRects = jsQrCropDebugRects.filter(r => now - r.t <= JSQR_CROP_DEBUG_MS);
             if (!jsQrCropDebugRects.length) return;
