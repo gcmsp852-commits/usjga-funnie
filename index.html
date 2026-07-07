@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader42</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -995,6 +995,8 @@
         const NEW_COLOR_DEFER_DECODE_AMB_FLOOR = 20;        // 後回し判定の下限セル数
         const NEW_COLOR_FLIP_RETRY_STEPS = [2, 4, 6, 8, 12, 16]; // 曖昧セル反転リトライの累積セル数
         const NEW_COLOR_FLIP_RETRY_MAX_CELLS = 96;          // 反転リトライ対象の曖昧セル数上限
+        const NEW_COLOR_STAGE3_BUDGET_MS = 260;             // Stage3の1入力あたりnewColor処理時間予算（悪フレーム深掘りを打ち切り次フレームへ）
+        const NEW_COLOR_DEFER_MAX_CANDIDATES = 2;           // 後回し（曖昧多）候補の消化上限
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -3219,9 +3221,11 @@
                 }
             }
 
+            let geoQ2Box = null;
             if (profile.firstQrPoints) {
                 const q2box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber);
                 if (q2box) {
+                    geoQ2Box = q2box;
                     recordGeometryCropDebug(q2box, '共通F0 幾何クロップ');
                     zxingCanvas.width = q2box.sw;
                     zxingCanvas.height = q2box.sh;
@@ -3275,6 +3279,16 @@
                         const sw = Math.min(vw - sx, Math.ceil(box.w) + pad * 2);
                         const sh = Math.min(vh - sy, Math.ceil(box.h) + pad * 2);
                         if (sw <= 32 || sh <= 32) continue;
+                        // newColor: BDクロップが F0 幾何クロップとほぼ同位置なら再分類しない。
+                        // 同じ領域のフル色分類（キャリブレーション込み 100〜250ms）を毎フレーム
+                        // 二重に行っていたのが Stage3 遅延の主要因（BDはカメラ移動時の追従保険として維持）。
+                        if (profile && profile.kind === 'newcolor' && geoQ2Box) {
+                            const bcx = sx + sw / 2;
+                            const bcy = sy + sh / 2;
+                            const gcx = geoQ2Box.sx + geoQ2Box.sw / 2;
+                            const gcy = geoQ2Box.sy + geoQ2Box.sh / 2;
+                            if (Math.hypot(bcx - gcx, bcy - gcy) < Math.max(geoQ2Box.sw, geoQ2Box.sh) * 0.25) continue;
+                        }
                         zxingCanvas.width = sw;
                         zxingCanvas.height = sh;
                         zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
@@ -6431,6 +6445,19 @@
                 recordAcceptedNewColorQr(qr);
                 return qr;
             }
+            // ★ クロスリージョン受理:
+            //   色ペアの系統誤分類（例: white↔yellow は特定ビットプレーンのみ反転）があると、
+            //   期待領域の行列から「別領域のQR」が正常復号されることがある（RS訂正成功＋mgmt整合）。
+            //   従来は qrNo 不一致で廃棄していたが、読めたデータ自体は正しいので
+            //   実際の qrNo を添えて返し、呼び出し側で正しい領域スロットへ格納する。
+            if (jsQrOptions && jsQrOptions.acceptCrossRegion && qr.data && !qr.isRaw) {
+                const actualQrNo = getQrNumber(qr);
+                if (actualQrNo !== null && actualQrNo >= 1 && actualQrNo <= 3) {
+                    recordAcceptedNewColorQr(qr);
+                    qr._crossRegionQrNo = actualQrNo;
+                    return qr;
+                }
+            }
             return null;
         }
 
@@ -7246,6 +7273,11 @@
             if (!q1Data || !q1Data.mgmtInfo) return null;
             const decoder = getNewColorDecoder(q1Data.mgmtInfo);
             if (!decoder) return null;
+            // Stage3の反復フレームでは1回の処理に時間予算を設ける。
+            // 悪い（ピンボケ等）フレームへ候補総当たりで数百ms〜秒単位を注ぎ込むより、
+            // 早く次のフレーム（フォーカスが合った瞬間）を取り込むほうが確定が速い（ログ実測）。
+            const budgetT0 = nowPerf();
+            const budgetMs = (scanStage === 3 && !appMask) ? NEW_COLOR_STAGE3_BUDGET_MS : Infinity;
             const localToVideoPoint = coordinateOptions && typeof coordinateOptions.localToVideoPoint === 'function'
                 ? coordinateOptions.localToVideoPoint
                 : null;
@@ -7329,6 +7361,8 @@
                 const loc = locInfo && locInfo.location;
                 return {
                     ...(baseOptions || {}),
+                    // 非暗号化領域のみ: 別領域として復号成功した結果も受け取り、正しいスロットへ回す
+                    acceptCrossRegion: !baseOptions,
                     probePhase: 'newColor matrix-located Q' + regionNo,
                     probeBin: 'matrix',
                     probeScale: (locInfo && locInfo.dimension ? locInfo.dimension : '?') + 'x' + (locInfo && locInfo.dimension ? locInfo.dimension : '?'),
@@ -7374,10 +7408,26 @@
                         colorProbe.regions[String(regionNo)] = 'failed';
                         continue;
                     }
+                    // クロスリージョン復号（期待領域と別のqrNoが読めた）は実qrNoのスロットへ格納
+                    let storeRegionNo = regionNo;
+                    if (qrMatrix._crossRegionQrNo !== undefined && qrMatrix._crossRegionQrNo !== null
+                        && qrMatrix._crossRegionQrNo !== regionNo - 1) {
+                        storeRegionNo = qrMatrix._crossRegionQrNo + 1;
+                        if (storeRegionNo < 2 || storeRegionNo > q1Data.mgmtInfo.regionCount
+                            || hasNewColorRegionAcquired(result, q1Data.mgmtInfo, storeRegionNo)) {
+                            colorProbe.regions[String(regionNo)] = 'failed';
+                            continue;
+                        }
+                    }
                     qrMatrix.location = locInfo.location;
                     qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
-                    storeNewColorRegionDecode(result, regionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
-                    colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : 'decode_success';
+                    storeNewColorRegionDecode(result, storeRegionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
+                    if (storeRegionNo !== regionNo) {
+                        colorProbe.regions[String(storeRegionNo)] = 'cross_success';
+                        colorProbe.regions[String(regionNo)] = 'failed';
+                    } else {
+                        colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : 'decode_success';
+                    }
                 }
                 if (colorProbe.summary) {
                     const failed = Object.values(colorProbe.regions).some(v => v === 'failed');
@@ -7408,6 +7458,7 @@
             const deferred = [];
             let stageComplete = isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
             for (let locIdx = 0; locIdx < colorLocations.length && !stageComplete; locIdx++) {
+                if (locIdx > 0 && nowPerf() - budgetT0 > budgetMs) break;
                 const locInfo = colorLocations[locIdx];
                 const colorProbe = {
                     phase: 'newColor color-classify',
@@ -7442,8 +7493,12 @@
             }
             if (!stageComplete && deferred.length) {
                 deferred.sort((a, b) => (Number.isFinite(a.ambAvg) ? a.ambAvg : Infinity) - (Number.isFinite(b.ambAvg) ? b.ambAvg : Infinity));
-                for (const cand of deferred) {
-                    stageComplete = attemptCandidateDecode(cand);
+                // 曖昧の多い候補はRS失敗の山を作るだけのことが多い（ログ実測: rs_failed数千/フレーム）。
+                // 消化は品質上位のみに限定し、残りは次フレームの新しい画像に賭ける。
+                const deferUpto = Math.min(deferred.length, NEW_COLOR_DEFER_MAX_CANDIDATES);
+                for (let di = 0; di < deferUpto; di++) {
+                    if (di > 0 && nowPerf() - budgetT0 > budgetMs) break;
+                    stageComplete = attemptCandidateDecode(deferred[di]);
                     if (stageComplete) break;
                 }
             }
@@ -8240,7 +8295,21 @@
                         else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
                         if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
                         const q2Stage3Profile = buildQ2ProfileForStage3();
-                        const ladderHit = await runLadder('Q2', q2Stage3Profile, {
+                        // newColor(3/4領域): 全画面カラー分類は高コストで成功実績が乏しく、
+                        // 成功はほぼ F0 幾何クロップ/BDクロップ入力の matrix-located。
+                        // 全画面は位置喪失時の保険として 1/3 フレームに間引き、回転変種と
+                        // フル解像度は撤去。BD detect も 1/2 フレームに間引いて
+                        // フレーム回転率を上げる（良フレーム到達を早める）。
+                        const isNewColorLadder = q2Stage3Profile && q2Stage3Profile.kind === 'newcolor';
+                        const newColorScales = [];
+                        if (isNewColorLadder && fullScanFrameIdx % 3 === 2) {
+                            newColorScales.push(fullScanFrameIdx % 6 === 2 ? 960 : 720);
+                        }
+                        const ladderHit = await runLadder('Q2', q2Stage3Profile, isNewColorLadder ? {
+                            fullScales: newColorScales,
+                            rotateFull: false,
+                            useBarcodeDetector: fullScanFrameIdx % 2 === 0
+                        } : {
                             fullScales: heavyScales,
                             rotateFull: fullScanFrameIdx % 6 === 0
                         });
