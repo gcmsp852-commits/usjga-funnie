@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader26</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -997,6 +997,7 @@
         const NEW_COLOR_FLIP_RETRY_MAX_CELLS = 96;          // 反転リトライ対象の曖昧セル数上限
         const NEW_COLOR_STAGE3_BUDGET_MS = 260;             // Stage3の1入力あたりnewColor処理時間予算（悪フレーム深掘りを打ち切り次フレームへ）
         const NEW_COLOR_DEFER_MAX_CANDIDATES = 2;           // 後回し（曖昧多）候補の消化上限
+        let newColorLocCache = null;                        // 直近で領域取得に成功した位置情報 { key, locInfo, at }
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -1878,6 +1879,9 @@
                         `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
                         `thrMargin=${s.threshold ? s.threshold.margin : '-'}${s.threshold && s.threshold.rel !== undefined ? '/rel=' + s.threshold.rel : ''} ${regionText} confusion=${confusion}`
                     );
+                    if (s.planeSep) {
+                        lines.push(`    planeSep: ${s.planeSep}`);
+                    }
                     if (s.calib) {
                         lines.push(`    calib: ${s.calib}`);
                     }
@@ -4747,6 +4751,7 @@
             newColorQ1Data = null;
             newColorScanResult = createNewColorScanResult();
             pendingNewColorFrame = null;
+            newColorLocCache = null;
         }
 
         function resetColorScanResult() {
@@ -6411,6 +6416,116 @@
             return bits;
         }
 
+        // ★ ビットプレーン別の色分離診断:
+        //   各領域ビットについて「bit=1群の実測セントロイド平均」と「bit=0群平均」の距離(群分離)と、
+        //   当該ビットのみ反転する色ペアの最小セントロイド間距離(minペア)を返す。
+        //   例: "Q2=118/62 Q3=41/28 Q4=105/55" → Q3のチャネルコントラストだけが崩れている、と即断できる。
+        function computeNewColorPlaneSeparations(decoder, centroids) {
+            if (!decoder || !decoder.states || !centroids) return null;
+            const names = Object.keys(decoder.states);
+            if (!names.length) return null;
+            const bitCount = (decoder.states[names[0]] || []).length;
+            const onlyBitDiffers = (a, b, bitIndex) => {
+                const ab = decoder.states[a] || [];
+                const bb = decoder.states[b] || [];
+                let diffAtBit = false;
+                for (let i = 0; i < Math.max(ab.length, bb.length); i++) {
+                    if (!!ab[i] !== !!bb[i]) {
+                        if (i !== bitIndex) return false;
+                        diffAtBit = true;
+                    }
+                }
+                return diffAtBit;
+            };
+            const parts = [];
+            for (let bitIndex = 0; bitIndex < bitCount; bitIndex++) {
+                const dark = [0, 0, 0];
+                const light = [0, 0, 0];
+                let dc = 0;
+                let lc = 0;
+                let minPair = Infinity;
+                for (const name of names) {
+                    const c = centroids[name];
+                    if (!c) continue;
+                    if (decoder.states[name][bitIndex]) { dark[0] += c[0]; dark[1] += c[1]; dark[2] += c[2]; dc++; }
+                    else { light[0] += c[0]; light[1] += c[1]; light[2] += c[2]; lc++; }
+                }
+                for (let i = 0; i < names.length; i++) {
+                    for (let j = i + 1; j < names.length; j++) {
+                        if (!onlyBitDiffers(names[i], names[j], bitIndex)) continue;
+                        const ca = centroids[names[i]];
+                        const cb = centroids[names[j]];
+                        if (!ca || !cb) continue;
+                        const d = Math.hypot(ca[0] - cb[0], ca[1] - cb[1], ca[2] - cb[2]);
+                        if (d < minPair) minPair = d;
+                    }
+                }
+                if (!dc || !lc) {
+                    parts.push(`Q${bitIndex + 2}=-`);
+                    continue;
+                }
+                const sep = Math.hypot(dark[0] / dc - light[0] / lc, dark[1] / dc - light[1] / lc, dark[2] / dc - light[2] / lc);
+                parts.push(`Q${bitIndex + 2}=${Math.round(sep)}/${Number.isFinite(minPair) ? Math.round(minPair) : '-'}`);
+            }
+            return parts.join(' ');
+        }
+
+        // ★ プレーン再判別ビット行列変種:
+        //   照明・印刷で特定チャネルのコントラストが崩れると、当該ビットのみ反転する色ペア
+        //   （例: black↔red, white↔cyan, yellow↔green, blue↔purple）の系統混同が起き、
+        //   1領域だけがRS訂正能力を超えて読めなくなる（実測ログのQ3膠着タイムアウトの正体）。
+        //   8色一括分類をやり直すのではなく、当該ビットの判定だけを作り直した行列を追加で試す:
+        //     pair2: セルごとに「best色」と「そのビット反転ペア色」の2択で再判別（8択→2択でノイズ耐性向上）
+        //     lda  : bit=1群/bit=0群の実測セントロイド平均への距離で判別（群平均でセル雑音を平均化）
+        function buildNewColorPlaneBitVariants(cand, decoder, bitIndex) {
+            const cells = cand.cells;
+            const centroids = cand.centroids;
+            const states = cand.states;
+            if (!cells || !cells.length || !centroids || !states || !states.length) return [];
+            const n = states.length;
+            const names = Object.keys(decoder.states);
+            const bitsOf = (name) => decoder.states[name] || [];
+            const pairOf = {};
+            for (const a of names) {
+                const ab = bitsOf(a);
+                for (const b of names) {
+                    if (a === b) continue;
+                    const bb = bitsOf(b);
+                    let same = true;
+                    let diffAtBit = false;
+                    for (let i = 0; i < Math.max(ab.length, bb.length); i++) {
+                        if (!!ab[i] !== !!bb[i]) {
+                            if (i === bitIndex) diffAtBit = true;
+                            else { same = false; break; }
+                        }
+                    }
+                    if (same && diffAtBit) { pairOf[a] = b; break; }
+                }
+            }
+            const variants = [];
+            let pairBits = Array.from({ length: n }, () => new Array(n).fill(false));
+            let pairOk = true;
+            for (const cell of cells) {
+                if (!cell || cell.r === undefined) continue;
+                const a = cell.state;
+                const b = pairOf[a];
+                const ca = centroids[a];
+                const cb = b ? centroids[b] : null;
+                if (!ca || !cb) { pairOk = false; break; }
+                const rgb = cell.rgb || { r: 255, g: 255, b: 255 };
+                const da = (rgb.r - ca[0]) * (rgb.r - ca[0]) + (rgb.g - ca[1]) * (rgb.g - ca[1]) + (rgb.b - ca[2]) * (rgb.b - ca[2]);
+                const db = (rgb.r - cb[0]) * (rgb.r - cb[0]) + (rgb.g - cb[1]) * (rgb.g - cb[1]) + (rgb.b - cb[2]) * (rgb.b - cb[2]);
+                const winner = da <= db ? a : b;
+                if (cell.r >= 0 && cell.r < n && cell.c >= 0 && cell.c < n) {
+                    pairBits[cell.r][cell.c] = !!bitsOf(winner)[bitIndex];
+                }
+            }
+            if (pairOk) variants.push({ tag: 'pair2', bits: pairBits });
+            // 注: 群平均(LDA)判別の変種も検証したが、この8色割当ではビットが単一チャネルに
+            //     対応しないため正常画像でも系統誤りを生む（合成検証で25%破壊）。pair2 のみ採用。
+            return variants;
+        }
+
         function decodeNewColorBitMatrixQr(bitsMatrix, expectedQrNo, jsQrOptions = null) {
             if (!bitsMatrix || !bitsMatrix.length || !window.jsQR || typeof jsQR.decodeMatrix !== 'function') return null;
             const phaseBase = (jsQrOptions && jsQrOptions.probePhase) || ('newColor matrix Q' + (expectedQrNo + 1));
@@ -7237,9 +7352,15 @@
                     if (calibration) calibParts.push(calibration.calibDebug);
                     if (axisClassifier) calibParts.push(axisClassifier.debug + ` dis=${altDisagreeCount}`);
                     if (calibParts.length) colorProbe.summary.calib = calibParts.join(' ');
+                    // ★ プレーン別分離度（群分離/minペア距離）: どの領域ビットの色コントラストが
+                    //   崩れているかをログから即断するための診断値
+                    if (calibration && calibration.centroids) {
+                        colorProbe.summary.planeSep = computeNewColorPlaneSeparations(decoder, calibration.centroids);
+                    }
                 }
                 colorProbe._cells = cells;
                 colorProbe._altStates = (altStates && altDisagreeCount > 0) ? altStates : null;
+                colorProbe._centroids = (calibration && calibration.centroids) ? calibration.centroids : null;
             }
             return states;
         }
@@ -7278,6 +7399,7 @@
             // 早く次のフレーム（フォーカスが合った瞬間）を取り込むほうが確定が速い（ログ実測）。
             const budgetT0 = nowPerf();
             const budgetMs = (scanStage === 3 && !appMask) ? NEW_COLOR_STAGE3_BUDGET_MS : Infinity;
+            const locCacheKey = width + 'x' + height;
             const localToVideoPoint = coordinateOptions && typeof coordinateOptions.localToVideoPoint === 'function'
                 ? coordinateOptions.localToVideoPoint
                 : null;
@@ -7356,6 +7478,12 @@
                 })
                 .map(item => item.loc);
 
+            // ★ 直近の取得実績がある位置情報を先頭で試す（同一クロップのStage3反復では
+            //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
+            if (newColorLocCache && newColorLocCache.key === locCacheKey && Date.now() - newColorLocCache.at < 4000) {
+                colorLocations.unshift(newColorLocCache.locInfo);
+            }
+
             const regionDecodeOptions = (regionNo, locInfo) => {
                 const baseOptions = regionNo === 2 ? q2DecodeOptions : (regionNo === 3 ? q3DecodeOptions : q4DecodeOptions);
                 const loc = locInfo && locInfo.location;
@@ -7404,6 +7532,19 @@
                         const altBits = buildBitMatrixFromColorStates(cand.altStates, decoder.states, bitIndex);
                         qrMatrix = decodeNewColorBitMatrixQr(altBits, regionNo - 1, regionDecodeOptions(regionNo, locInfo));
                     }
+                    if (!qrMatrix && cand.cells && cand.cells.length && cand.centroids) {
+                        // ★ プレーン再判別変種（pair2 / lda）:
+                        //   特定チャネルのコントラスト崩れによる系統混同で当該領域だけが
+                        //   読めないフレーム（実測ログのQ3膠着）を、当該ビット判定の作り直しで救済する。
+                        for (const variant of buildNewColorPlaneBitVariants(cand, decoder, bitIndex)) {
+                            qrMatrix = decodeNewColorBitMatrixQr(variant.bits, regionNo - 1,
+                                { ...regionDecodeOptions(regionNo, locInfo), probeBin: 'plane:' + variant.tag });
+                            if (qrMatrix) {
+                                qrMatrix._planeVariant = variant.tag;
+                                break;
+                            }
+                        }
+                    }
                     if (!qrMatrix) {
                         colorProbe.regions[String(regionNo)] = 'failed';
                         continue;
@@ -7422,11 +7563,14 @@
                     qrMatrix.location = locInfo.location;
                     qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
                     storeNewColorRegionDecode(result, storeRegionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
+                    // 実績のある位置情報をキャッシュ（同一クロップの次フレームで分類1回目から良候補を使う）
+                    newColorLocCache = { key: locCacheKey, locInfo, at: Date.now() };
+                    const successTag = qrMatrix._planeVariant ? 'decode_success(' + qrMatrix._planeVariant + ')' : 'decode_success';
                     if (storeRegionNo !== regionNo) {
                         colorProbe.regions[String(storeRegionNo)] = 'cross_success';
                         colorProbe.regions[String(regionNo)] = 'failed';
                     } else {
-                        colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : 'decode_success';
+                        colorProbe.regions[String(regionNo)] = qrMatrix.isRaw ? 'raw_capture' : successTag;
                     }
                 }
                 if (colorProbe.summary) {
@@ -7458,7 +7602,11 @@
             const deferred = [];
             let stageComplete = isNewColorAcquiredComplete(result, q1Data.mgmtInfo) || isNewColorStageComplete(result, q1Data.mgmtInfo);
             for (let locIdx = 0; locIdx < colorLocations.length && !stageComplete; locIdx++) {
-                if (locIdx > 0 && nowPerf() - budgetT0 > budgetMs) break;
+                if (locIdx > 0 && nowPerf() - budgetT0 > budgetMs) {
+                    // 予算打ち切り回数をレポートに残す（jsQR crop回数として計上される）
+                    recordJsQrInput('newColor budget-break', 'crop');
+                    break;
+                }
                 const locInfo = colorLocations[locIdx];
                 const colorProbe = {
                     phase: 'newColor color-classify',
@@ -7478,9 +7626,11 @@
                 if (!sampledStates) continue;
                 const cells = colorProbe._cells || null;
                 const altStates = colorProbe._altStates || null;
+                const centroids = colorProbe._centroids || null;
                 delete colorProbe._cells;
                 delete colorProbe._altStates;
-                const cand = { locInfo, states: sampledStates, cells, altStates, colorProbe };
+                delete colorProbe._centroids;
+                const cand = { locInfo, states: sampledStates, cells, altStates, centroids, colorProbe };
                 const dim = locInfo.dimension || 0;
                 const ambAvg = neededRegionAmbiguity(colorProbe);
                 const deferLimit = Math.max(NEW_COLOR_DEFER_DECODE_AMB_FLOOR, dim * dim * NEW_COLOR_DEFER_DECODE_AMB_PCT);
@@ -7496,8 +7646,12 @@
                 // 曖昧の多い候補はRS失敗の山を作るだけのことが多い（ログ実測: rs_failed数千/フレーム）。
                 // 消化は品質上位のみに限定し、残りは次フレームの新しい画像に賭ける。
                 const deferUpto = Math.min(deferred.length, NEW_COLOR_DEFER_MAX_CANDIDATES);
+                if (deferUpto < deferred.length) recordJsQrInput('newColor defer-dropped', 'crop');
                 for (let di = 0; di < deferUpto; di++) {
-                    if (di > 0 && nowPerf() - budgetT0 > budgetMs) break;
+                    if (di > 0 && nowPerf() - budgetT0 > budgetMs) {
+                        recordJsQrInput('newColor budget-break', 'crop');
+                        break;
+                    }
                     stageComplete = attemptCandidateDecode(deferred[di]);
                     if (stageComplete) break;
                 }
