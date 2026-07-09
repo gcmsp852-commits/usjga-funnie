@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader73</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -997,7 +997,7 @@
         const NEW_COLOR_FLIP_RETRY_MAX_CELLS = 96;          // 反転リトライ対象の曖昧セル数上限
         const NEW_COLOR_STAGE3_BUDGET_MS = 260;             // Stage3の1入力あたりnewColor処理時間予算（悪フレーム深掘りを打ち切り次フレームへ）
         const NEW_COLOR_DEFER_MAX_CANDIDATES = 2;           // 後回し（曖昧多）候補の消化上限
-        let newColorLocCache = null;                        // 直近で領域取得に成功した位置情報 { key, locInfo, at }
+        let newColorLocCache = null;                        // 直近で領域取得に成功した位置情報 { key, locInfo, at, missCount }
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -2979,6 +2979,15 @@
             const vw = video.videoWidth;
             const vh = video.videoHeight;
 
+            // ★ BarcodeDetector.detect はネイティブ側の非同期処理なので先に発行し、
+            //   F0.5/F0 のCPU処理（クロップ＋jsQR/色分類）と並行させる。F1到達時には
+            //   ほぼ解決済みで実効BD待ち≈0（従来はここで直列に60〜120ms待っていた）。
+            //   注: レポートのBD所要にはCPU処理と重なった区間も含まれ得る（壁時計は短縮）。
+            let bdDetectPromise = null;
+            if (barcodeDetector && ladderOpts.useBarcodeDetector !== false) {
+                bdDetectPromise = timedDetect('共通F1 BarcodeDetectorクロップ', video).catch(() => null);
+            }
+
             let sawRaw = false, sawOther = false;
             const debugQ1Rect = (profile && profile.firstQrPoints) ? rectFromPoints(profile.firstQrPoints) : null;
             const debugExpectedQ2Box = (target === 'Q2' && profile && profile.firstQrPoints)
@@ -3243,10 +3252,10 @@
                 }
             }
 
-            // F1: BarcodeDetectorで位置検出 → 重複bboxを集約してクロップ復号。
-            if (barcodeDetector && ladderOpts.useBarcodeDetector !== false) {
+            // F1: BarcodeDetectorで位置検出（冒頭で発行済み） → 重複bboxを集約してクロップ復号。
+            if (bdDetectPromise) {
                 try {
-                    const barcodes = await timedDetect('共通F1 BarcodeDetectorクロップ', video);
+                    const barcodes = await bdDetectPromise;
                     recordBarcodeDetections('共通F1 BarcodeDetectorクロップ', barcodes ? barcodes.length : 0);
                     recordBarcodeBoxes('共通F1 BarcodeDetectorクロップ', barcodes, scanStage, 'video');
                     const boxes = [];
@@ -7447,40 +7456,53 @@
                 _probeExpectedQ2Rect: shiftedBoundsVideo || shiftedBounds
             };
             const locateImageType = (video && width === video.videoWidth && height === video.videoHeight) ? 'full' : 'crop';
-            recordJsQrInput('newColor color-locate', locateImageType);
-            const locateT0 = nowPerf();
-            let colorLocations = [];
-            try {
-                colorLocations = (window.jsQR && typeof jsQR.extractLocations === 'function')
-                    ? (jsQR.extractLocations(imageData.data, width, height, locateOptions) || [])
-                    : [];
-            } catch (e) {
-                colorLocations = [];
+            // ★ 実績位置キャッシュが新しいうちは locate（30〜60ms）と全候補分類を省略し、
+            //   キャッシュ候補1件の分類→復号だけで回す（フレーム回転率を上げ、良フレーム到達を早める）。
+            //   キャッシュ候補で2フレーム連続新規取得ゼロなら通常 locate に戻す（位置ズレ・別候補対応）。
+            const cacheFresh = !!(newColorLocCache && newColorLocCache.key === locCacheKey && Date.now() - newColorLocCache.at < 4000);
+            const skipLocate = cacheFresh && scanStage === 3 && !appMask && (newColorLocCache.missCount || 0) < 2;
+            let acquiredBefore = 0;
+            for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) acquiredBefore++;
             }
-            addPhaseElapsed(scanStage, 'newColor color-locate', nowPerf() - locateT0, 'jsqr');
-            recordJsQrProbes(scanStage, 'newColor color-locate', locateProbeCollector, {
-                bin: 'native',
-                scale: width + 'x' + height,
-                rot: '0',
-                dec: 'locate',
-                imageType: locateImageType
-            });
+            let colorLocations = [];
+            if (skipLocate) {
+                recordJsQrInput('newColor locate-skip', locateImageType);
+            } else {
+                recordJsQrInput('newColor color-locate', locateImageType);
+                const locateT0 = nowPerf();
+                try {
+                    colorLocations = (window.jsQR && typeof jsQR.extractLocations === 'function')
+                        ? (jsQR.extractLocations(imageData.data, width, height, locateOptions) || [])
+                        : [];
+                } catch (e) {
+                    colorLocations = [];
+                }
+                addPhaseElapsed(scanStage, 'newColor color-locate', nowPerf() - locateT0, 'jsqr');
+                recordJsQrProbes(scanStage, 'newColor color-locate', locateProbeCollector, {
+                    bin: 'native',
+                    scale: width + 'x' + height,
+                    rot: '0',
+                    dec: 'locate',
+                    imageType: locateImageType
+                });
 
-            colorLocations = colorLocations
-                .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, shiftedBounds) }))
-                .filter(item => item.loc && !item.rank.reject)
-                .sort((a, b) => {
-                    if (b.rank.score !== a.rank.score) return b.rank.score - a.rank.score;
-                    // ログ実測では alignFixed=1（アライメント位置強制）の候補が高確率で復号成功するため優先
-                    const aFixed = a.loc.probeMeta && a.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
-                    const bFixed = b.loc.probeMeta && b.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
-                    return bFixed - aFixed;
-                })
-                .map(item => item.loc);
+                colorLocations = colorLocations
+                    .map(loc => ({ loc, rank: scoreNewColorLocationForExpected(loc, q1Bounds, shiftedBounds) }))
+                    .filter(item => item.loc && !item.rank.reject)
+                    .sort((a, b) => {
+                        if (b.rank.score !== a.rank.score) return b.rank.score - a.rank.score;
+                        // ログ実測では alignFixed=1（アライメント位置強制）の候補が高確率で復号成功するため優先
+                        const aFixed = a.loc.probeMeta && a.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
+                        const bFixed = b.loc.probeMeta && b.loc.probeMeta.alignmentForcedExpected ? 1 : 0;
+                        return bFixed - aFixed;
+                    })
+                    .map(item => item.loc);
+            }
 
             // ★ 直近の取得実績がある位置情報を先頭で試す（同一クロップのStage3反復では
             //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
-            if (newColorLocCache && newColorLocCache.key === locCacheKey && Date.now() - newColorLocCache.at < 4000) {
+            if (cacheFresh) {
                 colorLocations.unshift(newColorLocCache.locInfo);
             }
 
@@ -7564,7 +7586,7 @@
                     qrMatrix.versionNumber = qrMatrix.versionNumber || ((qrMatrix.version && qrMatrix.version.versionNumber) || q1Data.version || q1Data.versionNumber);
                     storeNewColorRegionDecode(result, storeRegionNo, toVideoQr(qrMatrix), 'matrix-located', q1Data.mgmtInfo);
                     // 実績のある位置情報をキャッシュ（同一クロップの次フレームで分類1回目から良候補を使う）
-                    newColorLocCache = { key: locCacheKey, locInfo, at: Date.now() };
+                    newColorLocCache = { key: locCacheKey, locInfo, at: Date.now(), missCount: 0 };
                     const successTag = qrMatrix._planeVariant ? 'decode_success(' + qrMatrix._planeVariant + ')' : 'decode_success';
                     if (storeRegionNo !== regionNo) {
                         colorProbe.regions[String(storeRegionNo)] = 'cross_success';
@@ -7659,6 +7681,15 @@
 
             if (q1Data.mgmtInfo && q1Data.mgmtInfo.dataCompBits === 0 && result.qr3 && q1Data.text && result.qr3 === q1Data.text) {
                 result.qr3 = null;
+            }
+
+            // locate省略フレームの成否を記録（連続失敗で通常locateへ復帰させる）
+            if (skipLocate && newColorLocCache) {
+                let acquiredNow = 0;
+                for (let regionNo = 2; regionNo <= q1Data.mgmtInfo.regionCount; regionNo++) {
+                    if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, regionNo)) acquiredNow++;
+                }
+                newColorLocCache.missCount = acquiredNow > acquiredBefore ? 0 : (newColorLocCache.missCount || 0) + 1;
             }
 
             return result;
@@ -8434,7 +8465,8 @@
                         const q1Scales = [];
                         if (fullScanFrameIdx % 2 === 0) q1Scales.push(960);
                         else q1Scales.push(720);
-                        if (maxDim > 0 && fullScanFrameIdx % 8 === 5) q1Scales.push(maxDim);
+                        // フル解像度は成功実績なし（実測ログ）のため保険として 1/16 に間引き
+                        if (maxDim > 0 && fullScanFrameIdx % 16 === 5) q1Scales.push(maxDim);
                         const ladderHit = await runLadder('Q1', buildQ1ProfileForStage1(), {
                             fullScales: q1Scales,
                             rotateFull: true
@@ -8449,15 +8481,15 @@
                         else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
                         if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
                         const q2Stage3Profile = buildQ2ProfileForStage3();
-                        // newColor(3/4領域): 全画面カラー分類は高コストで成功実績が乏しく、
-                        // 成功はほぼ F0 幾何クロップ/BDクロップ入力の matrix-located。
-                        // 全画面は位置喪失時の保険として 1/3 フレームに間引き、回転変種と
-                        // フル解像度は撤去。BD detect も 1/2 フレームに間引いて
+                        // newColor(3/4領域): 全画面カラー分類は高コストで成功実績ゼロのまま
+                        // （直近11試行ログでも全fail、成功はすべて F0/F0.5/F1 クロップ入力の
+                        // matrix-located）。位置喪失時の保険として 1/6 フレームまで間引き、
+                        // 回転変種とフル解像度は撤去。BD detect も 1/2 フレームに間引いて
                         // フレーム回転率を上げる（良フレーム到達を早める）。
                         const isNewColorLadder = q2Stage3Profile && q2Stage3Profile.kind === 'newcolor';
                         const newColorScales = [];
-                        if (isNewColorLadder && fullScanFrameIdx % 3 === 2) {
-                            newColorScales.push(fullScanFrameIdx % 6 === 2 ? 960 : 720);
+                        if (isNewColorLadder && fullScanFrameIdx % 6 === 5) {
+                            newColorScales.push(fullScanFrameIdx % 12 === 5 ? 960 : 720);
                         }
                         const ladderHit = await runLadder('Q2', q2Stage3Profile, isNewColorLadder ? {
                             fullScales: newColorScales,
