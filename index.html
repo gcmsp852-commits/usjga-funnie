@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader91</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -998,6 +998,7 @@
         const NEW_COLOR_STAGE3_BUDGET_MS = 260;             // Stage3の1入力あたりnewColor処理時間予算（悪フレーム深掘りを打ち切り次フレームへ）
         const NEW_COLOR_DEFER_MAX_CANDIDATES = 2;           // 後回し（曖昧多）候補の消化上限
         let newColorLocCache = null;                        // 直近で領域取得に成功した位置情報 { key, locInfo, at, missCount }
+        let newColorPlaneVotes = null;                      // 未取得領域のビット±1票蓄積 { dim, at, votes:{regionNo:Int16Array}, adds:{regionNo:n} }
         const TRI_COLOR_ORDER = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
@@ -3301,6 +3302,9 @@
                             const gcx = geoQ2Box.sx + geoQ2Box.sw / 2;
                             const gcy = geoQ2Box.sy + geoQ2Box.sh / 2;
                             if (Math.hypot(bcx - gcx, bcy - gcy) < Math.max(geoQ2Box.sw, geoQ2Box.sh) * 0.25) continue;
+                            // 幾何クロップが生きている限りBDクロップの色分類は追従保険でしかない。
+                            // 遠いbboxの再分類（約90ms×毎フレーム、実測2.9s/20s）は 1/4 フレームに間引く。
+                            if (fullScanFrameIdx % 4 !== 1) continue;
                         }
                         zxingCanvas.width = sw;
                         zxingCanvas.height = sh;
@@ -4761,6 +4765,7 @@
             newColorScanResult = createNewColorScanResult();
             pendingNewColorFrame = null;
             newColorLocCache = null;
+            newColorPlaneVotes = null;
         }
 
         function resetColorScanResult() {
@@ -7657,6 +7662,43 @@
                             }
                         }
                     }
+                    // ★ プレーン多数決: 誤りセルはフレーム毎に変わる（ノイズ・にじみ・照明ゆらぎ起因）ため、
+                    //   良候補の失敗ビット行列も±1票で蓄積し、3回分たまったら多数決行列を追加変種として試す。
+                    //   （実測ログ: 最後の1領域がRS限界±数セルで数十フレーム膠着するケースの救済。
+                    //     成功時は decode_success(vote) と表示される）
+                    if (!qrMatrix && colorProbe.summary
+                        && Number.isFinite(colorProbe.summary.ambiguousTotal)
+                        && colorProbe.summary.ambiguousTotal <= bits.length * bits.length * 0.18
+                        && (colorProbe.fpRank === 0 || colorProbe.fpRank === 1)) {
+                        const vn = bits.length;
+                        if (!newColorPlaneVotes || newColorPlaneVotes.dim !== vn || Date.now() - newColorPlaneVotes.at > 6000) {
+                            newColorPlaneVotes = { dim: vn, at: Date.now(), votes: {}, adds: {} };
+                        }
+                        newColorPlaneVotes.at = Date.now();
+                        if (!newColorPlaneVotes.votes[regionNo]) {
+                            newColorPlaneVotes.votes[regionNo] = new Int16Array(vn * vn);
+                            newColorPlaneVotes.adds[regionNo] = 0;
+                        }
+                        const va = newColorPlaneVotes.votes[regionNo];
+                        for (let vr = 0; vr < vn; vr++) {
+                            const rowBits = bits[vr];
+                            for (let vc = 0; vc < vn; vc++) va[vr * vn + vc] += rowBits[vc] ? 1 : -1;
+                        }
+                        newColorPlaneVotes.adds[regionNo]++;
+                        if (newColorPlaneVotes.adds[regionNo] >= 3) {
+                            const voteBits = new Array(vn);
+                            for (let vr = 0; vr < vn; vr++) {
+                                voteBits[vr] = new Array(vn);
+                                for (let vc = 0; vc < vn; vc++) {
+                                    const v = va[vr * vn + vc];
+                                    voteBits[vr][vc] = v > 0 ? true : (v < 0 ? false : !!bits[vr][vc]);
+                                }
+                            }
+                            qrMatrix = decodeNewColorBitMatrixQr(voteBits, regionNo - 1,
+                                { ...regionDecodeOptions(regionNo, locInfo), probeBin: 'plane:vote' });
+                            if (qrMatrix) qrMatrix._planeVariant = 'vote';
+                        }
+                    }
                     if (!qrMatrix) {
                         colorProbe.regions[String(regionNo)] = 'failed';
                         continue;
@@ -8591,7 +8633,9 @@
                         const ladderHit = await runLadder('Q2', q2Stage3Profile, isNewColorLadder ? {
                             fullScales: newColorScales,
                             rotateFull: false,
-                            useBarcodeDetector: fullScanFrameIdx % 2 === 0
+                            // BD detect(約190ms/回)は成功寄与ゼロが続くため 1/4 フレームに間引き
+                            // （位置は幾何クロップ＋locateキャッシュが毎フレーム追従する）
+                            useBarcodeDetector: fullScanFrameIdx % 4 === 0
                         } : {
                             fullScales: heavyScales,
                             rotateFull: fullScanFrameIdx % 6 === 0
