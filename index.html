@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader87</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -6906,6 +6906,7 @@
         //     内側白リング角 → yellow=(1,5) cyan=(5,1) green=(5,5)
         //   パレットはデータセルと同一インク・同一照明・同一ボケなので、実測すれば
         //   印刷やディスプレイの発色差に依らず分類セントロイドを現物合わせできる。
+        let newColorPaletteLastReason = '';                 // 直近のパレット棄却理由（calib行の pal=0(...) 表示用）
         const NEW_COLOR_PALETTE_LAYOUT = [
             { name: 'purple', dr: 0, dc: 0 },
             { name: 'blue',   dr: 0, dc: 6 },
@@ -6915,7 +6916,8 @@
             { name: 'green',  dr: 5, dc: 5 }
         ];
         function sampleNewColorPaletteCentroids(cellRgb, hasSample, n) {
-            if (!cellRgb || !n || n < 21) return null;
+            newColorPaletteLastReason = '';
+            if (!cellRgb || !n || n < 21) { newColorPaletteLastReason = 'na'; return null; }
             const fps = [
                 { r: 0, c: 0 },
                 { r: 0, c: n - 7 },
@@ -6938,10 +6940,18 @@
                     chG.push(cellRgb[base + 1]);
                     chB.push(cellRgb[base + 2]);
                 }
-                if (chR.length < 2) return null; // 1点だけでは汚れ・反射に弱い
+                if (chR.length < 2) { newColorPaletteLastReason = 'ns:' + item.name.slice(0, 3); return null; } // 1点だけでは汚れ・反射に弱い
                 chR.sort((a, b) => a - b);
                 chG.sort((a, b) => a - b);
                 chB.sort((a, b) => a - b);
+                // 同一色の3FPサンプルは同一インクなので大きくは散らない。散る＝格子が
+                // パレット位置に合っていない（ズレた格子が偶然6色拾う誤採用を弾く）
+                const spread = Math.max(
+                    chR[chR.length - 1] - chR[0],
+                    chG[chG.length - 1] - chG[0],
+                    chB[chB.length - 1] - chB[0]
+                );
+                if (spread > 72) { newColorPaletteLastReason = 'spread:' + item.name.slice(0, 3) + Math.round(spread); return null; }
                 const mid = chR.length >> 1;
                 out[item.name] = [chR[mid], chG[mid], chB[mid]];
                 sampledColors++;
@@ -6955,7 +6965,11 @@
                 for (let j = i + 1; j < names.length; j++) {
                     const a = out[names[i]];
                     const b = out[names[j]];
-                    if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 15) return null;
+                    const dp = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+                    if (dp < 15) {
+                        newColorPaletteLastReason = 'pair:' + names[i].slice(0, 3) + '-' + names[j].slice(0, 3) + Math.round(dp);
+                        return null;
+                    }
                 }
             }
             return out;
@@ -7161,7 +7175,7 @@
                 calibDebug: candidates.map(name =>
                     name.slice(0, 3) + ':' + centroids[name].map(v => Math.round(v)).join('/')
                 ).join(' ') + ` ancDk=${darkAnchor.count} ancLt=${lightAnchor.count} ancDist=${Math.round(anchorDist)}`
-                    + (palette ? ' pal=1' : (regionCount === 4 ? ' pal=0' : ''))
+                    + (palette ? ' pal=1' : (regionCount === 4 ? ' pal=0(' + (newColorPaletteLastReason || '-') + ')' : ''))
             };
         }
 
@@ -7652,7 +7666,14 @@
                     if (qrMatrix._crossRegionQrNo !== undefined && qrMatrix._crossRegionQrNo !== null
                         && qrMatrix._crossRegionQrNo !== regionNo - 1) {
                         storeRegionNo = qrMatrix._crossRegionQrNo + 1;
-                        if (storeRegionNo < 2 || storeRegionNo > q1Data.mgmtInfo.regionCount
+                        if (storeRegionNo < 2) {
+                            // ビット行列がQ1(qrNo=0)として復号できた＝この候補格子は第1QR自身。
+                            // 色シンボルではないため残り領域の試行も無駄（紙ログ実測: この繰り返しが
+                            // 20秒中 数千回の decode_success→棄却 を生み時間予算を食い潰していた）。
+                            colorProbe.regions[String(regionNo)] = 'q1_shadow';
+                            break;
+                        }
+                        if (storeRegionNo > q1Data.mgmtInfo.regionCount
                             || hasNewColorRegionAcquired(result, q1Data.mgmtInfo, storeRegionNo)) {
                             colorProbe.regions[String(regionNo)] = 'failed';
                             continue;
