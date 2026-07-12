@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader11</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1003,6 +1003,10 @@
         const TRI_DARK_PRIORITY = ['blue', 'red', 'purple'];
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
         const QUAD_COLOR_NAMES = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
+        const NEW_COLOR_SUPERSAMPLE_THRESHOLD_PX = 9;
+        const NEW_COLOR_SUPERSAMPLE_SCALE = 2;
+        let newColorSupersampleSourceCanvas = null;
+        let newColorSupersampleTargetCanvas = null;
 
         // モード: 'normal', 'double', 'digital_sign', 'color_enc', 'new_color_enc'
         let scanMode = 'normal';
@@ -1875,6 +1879,7 @@
                         : '-';
                     lines.push(
                         `  #${idx + 1} loc=${cp.locationIndex} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
                         `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
@@ -6190,6 +6195,77 @@
             };
         }
 
+        function createNewColorSupersampledInput(src, width, height, locationInfo) {
+            if (!src || !locationInfo || !locationInfo.mappingFunction) return null;
+            const moduleSize = Number(locationInfo.moduleSize) || 0;
+            if (!(moduleSize > 0 && moduleSize < NEW_COLOR_SUPERSAMPLE_THRESHOLD_PX)) return null;
+
+            const dimension = Number(locationInfo.dimension) || 0;
+            if (!dimension) return null;
+            const map = locationInfo.mappingFunction;
+            const corners = [map(0, 0), map(dimension, 0), map(dimension, dimension), map(0, dimension)]
+                .filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+            if (corners.length !== 4) return null;
+
+            const padding = Math.max(2, Math.ceil(moduleSize));
+            const sx = Math.max(0, Math.floor(Math.min(...corners.map(p => p.x)) - padding));
+            const sy = Math.max(0, Math.floor(Math.min(...corners.map(p => p.y)) - padding));
+            const ex = Math.min(width, Math.ceil(Math.max(...corners.map(p => p.x)) + padding));
+            const ey = Math.min(height, Math.ceil(Math.max(...corners.map(p => p.y)) + padding));
+            const sw = ex - sx;
+            const sh = ey - sy;
+            if (sw < 2 || sh < 2) return null;
+
+            try {
+                if (!newColorSupersampleSourceCanvas) newColorSupersampleSourceCanvas = document.createElement('canvas');
+                if (!newColorSupersampleTargetCanvas) newColorSupersampleTargetCanvas = document.createElement('canvas');
+
+                const sourceCanvas = newColorSupersampleSourceCanvas;
+                sourceCanvas.width = sw;
+                sourceCanvas.height = sh;
+                const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+                const cropData = sourceCtx.createImageData(sw, sh);
+                for (let y = 0; y < sh; y++) {
+                    const srcStart = ((sy + y) * width + sx) * 4;
+                    const srcEnd = srcStart + sw * 4;
+                    cropData.data.set(src.subarray(srcStart, srcEnd), y * sw * 4);
+                }
+                sourceCtx.putImageData(cropData, 0, 0);
+
+                const scale = NEW_COLOR_SUPERSAMPLE_SCALE;
+                const targetCanvas = newColorSupersampleTargetCanvas;
+                targetCanvas.width = sw * scale;
+                targetCanvas.height = sh * scale;
+                const targetCtx = targetCanvas.getContext('2d', { willReadFrequently: true });
+                targetCtx.imageSmoothingEnabled = true;
+                if ('imageSmoothingQuality' in targetCtx) targetCtx.imageSmoothingQuality = 'high';
+                targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+                targetCtx.drawImage(sourceCanvas, 0, 0, sw, sh, 0, 0, targetCanvas.width, targetCanvas.height);
+                const scaledData = targetCtx.getImageData(0, 0, targetCanvas.width, targetCanvas.height);
+
+                const scaledLocationInfo = Object.assign({}, locationInfo, {
+                    moduleSize: moduleSize * scale,
+                    mappingFunction: (x, y) => {
+                        const p = map(x, y);
+                        return p ? { x: (p.x - sx) * scale, y: (p.y - sy) * scale } : null;
+                    }
+                });
+                return {
+                    src: scaledData.data,
+                    width: targetCanvas.width,
+                    height: targetCanvas.height,
+                    locationInfo: scaledLocationInfo,
+                    scale,
+                    originalModuleSize: moduleSize,
+                    effectiveModuleSize: moduleSize * scale,
+                    crop: { sx, sy, sw, sh }
+                };
+            } catch (e) {
+                console.warn('newColor supersampling failed; using original pixels', e);
+                return null;
+            }
+        }
+
         function buildNewColorAffine(q1Data) {
             if (!q1Data || !q1Data.location || typeof q1Data.version !== 'number') return null;
             const tl = q1Data.location.topLeftCorner;
@@ -7783,7 +7859,17 @@
                     regionCount: q1Data.mgmtInfo.regionCount,
                     regions: {}
                 };
-                const sampledStates = sampleNewColorDisplayStatesFromLocation(imageData.data, width, height, locInfo, decoder, colorProbe);
+                const supersampled = createNewColorSupersampledInput(imageData.data, width, height, locInfo);
+                const sampleSrc = supersampled ? supersampled.src : imageData.data;
+                const sampleWidth = supersampled ? supersampled.width : width;
+                const sampleHeight = supersampled ? supersampled.height : height;
+                const sampleLocationInfo = supersampled ? supersampled.locationInfo : locInfo;
+                if (supersampled) {
+                    colorProbe.supersampleScale = supersampled.scale;
+                    colorProbe.effectiveModuleSize = supersampled.effectiveModuleSize;
+                    colorProbe.supersampleCrop = supersampled.crop;
+                }
+                const sampledStates = sampleNewColorDisplayStatesFromLocation(sampleSrc, sampleWidth, sampleHeight, sampleLocationInfo, decoder, colorProbe);
                 if (!sampledStates) continue;
                 const cells = colorProbe._cells || null;
                 const altStates = colorProbe._altStates || null;
