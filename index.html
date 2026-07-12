@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader68</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -6807,6 +6807,10 @@
             for (const [fr, fc] of finderOrigins) {
                 for (let i = 0; i < 7; i++) {
                     for (let j = 0; j < 7; j++) {
+                        // 4領域化カラーパレットの埋め込み位置（FP角の6セル）は黒白アンカーから除外
+                        // （パレット無しの図版でも3FP×6=18セル減るだけで頑健推定に影響なし）
+                        if ((i === 0 && (j === 0 || j === 6)) || (i === 6 && j === 0)
+                            || (i === 1 && j === 5) || (i === 5 && (j === 1 || j === 5))) continue;
                         const dark = (i === 0 || i === 6 || j === 0 || j === 6) || (i >= 2 && i <= 4 && j >= 2 && j <= 4);
                         (dark ? darkIdx : lightIdx).push(idx(fr + i, fc + j));
                     }
@@ -6896,6 +6900,67 @@
             return { darkName, lightName };
         }
 
+        // ★ 4領域化: 3つのファインダーパターン角に生成側(embedColorPalette)が埋め込む
+        //   6色カラーパレットの位置（FP原点からの相対セル）。
+        //     外枠黒リング角 → purple=(0,0) blue=(0,6) red=(6,0)
+        //     内側白リング角 → yellow=(1,5) cyan=(5,1) green=(5,5)
+        //   パレットはデータセルと同一インク・同一照明・同一ボケなので、実測すれば
+        //   印刷やディスプレイの発色差に依らず分類セントロイドを現物合わせできる。
+        const NEW_COLOR_PALETTE_LAYOUT = [
+            { name: 'purple', dr: 0, dc: 0 },
+            { name: 'blue',   dr: 0, dc: 6 },
+            { name: 'red',    dr: 6, dc: 0 },
+            { name: 'yellow', dr: 1, dc: 5 },
+            { name: 'cyan',   dr: 5, dc: 1 },
+            { name: 'green',  dr: 5, dc: 5 }
+        ];
+        function sampleNewColorPaletteCentroids(cellRgb, hasSample, n) {
+            if (!cellRgb || !n || n < 21) return null;
+            const fps = [
+                { r: 0, c: 0 },
+                { r: 0, c: n - 7 },
+                { r: n - 7, c: 0 }
+            ];
+            const out = {};
+            let sampledColors = 0;
+            const chR = [];
+            const chG = [];
+            const chB = [];
+            for (const item of NEW_COLOR_PALETTE_LAYOUT) {
+                chR.length = 0;
+                chG.length = 0;
+                chB.length = 0;
+                for (const fp of fps) {
+                    const idx = (fp.r + item.dr) * n + (fp.c + item.dc);
+                    if (!hasSample[idx]) continue;
+                    const base = idx * 3;
+                    chR.push(cellRgb[base]);
+                    chG.push(cellRgb[base + 1]);
+                    chB.push(cellRgb[base + 2]);
+                }
+                if (chR.length < 2) return null; // 1点だけでは汚れ・反射に弱い
+                chR.sort((a, b) => a - b);
+                chG.sort((a, b) => a - b);
+                chB.sort((a, b) => a - b);
+                const mid = chR.length >> 1;
+                out[item.name] = [chR[mid], chG[mid], chB[mid]];
+                sampledColors++;
+            }
+            if (sampledColors !== NEW_COLOR_PALETTE_LAYOUT.length) return null;
+            // 相互分離の検証: パレット位置に本当に6色が印刷されているかの判定を兼ねる。
+            // パレット無しの旧図版ではFP角は黒/白リングそのままなので3色ずつ潰れて棄却され、
+            // 従来キャリブレーションに自動フォールバックする（後方互換）。
+            const names = Object.keys(out);
+            for (let i = 0; i < names.length; i++) {
+                for (let j = i + 1; j < names.length; j++) {
+                    const a = out[names[i]];
+                    const b = out[names[j]];
+                    if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 15) return null;
+                }
+            }
+            return out;
+        }
+
         // ★ フレーム内キャリブレーション本体:
         //   1) ファンクションパターンから黒白アンカーの実測セントロイドを取得
         //   2) 従来分類の高確信セルから中間色（red/yellow等）の実測シードを取得
@@ -6932,7 +6997,13 @@
             ];
             const middleNames = candidates.filter(name => name !== darkName && name !== lightName);
 
-            // 中間色シード: 従来分類の高確信セルの実測メディアン
+            // ★ カラーパレット実測シード（4領域化）: 紙印刷ではインクの実色が
+            //   ディスプレイ前提の理想色から系統的にズレ、固定プロファイル分類による
+            //   高確信シードが全滅→理想色写像のまま→「自信満々の誤分類」になる
+            //   （紙タイムアウトのログ実測）。パレットが読めればそれを絶対シードに使う。
+            const palette = regionCount === 4 ? sampleNewColorPaletteCentroids(cellRgb, hasSample, n) : null;
+
+            // 中間色シード: 従来分類の高確信セルの実測メディアン（パレット取得時は不要）
             const seedBuckets = new Map();
             for (const name of middleNames) {
                 seedBuckets.set(name, {
@@ -6940,7 +7011,7 @@
                     count: 0
                 });
             }
-            if (middleNames.length) {
+            if (middleNames.length && !palette) {
                 for (let cellIdx = 0; cellIdx < total; cellIdx++) {
                     if (!hasSample[cellIdx]) continue;
                     const base = cellIdx * 3;
@@ -6958,6 +7029,10 @@
                 }
             }
             for (const name of middleNames) {
+                if (palette && palette[name]) {
+                    centroids[name] = palette[name].slice();
+                    continue;
+                }
                 const bucket = seedBuckets.get(name);
                 if (bucket && bucket.count >= NEW_COLOR_CALIB_MIN_SEED_CELLS) {
                     centroids[name] = [
@@ -7086,6 +7161,7 @@
                 calibDebug: candidates.map(name =>
                     name.slice(0, 3) + ':' + centroids[name].map(v => Math.round(v)).join('/')
                 ).join(' ') + ` ancDk=${darkAnchor.count} ancLt=${lightAnchor.count} ancDist=${Math.round(anchorDist)}`
+                    + (palette ? ' pal=1' : (regionCount === 4 ? ' pal=0' : ''))
             };
         }
 
@@ -8482,7 +8558,7 @@
                         if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
                         const q2Stage3Profile = buildQ2ProfileForStage3();
                         // newColor(3/4領域): 全画面カラー分類は高コストで成功実績ゼロのまま
-                        // （直近11試行ログでも全fail、成功はすべて F0/F0.5/F1 クロップ入力の
+                        // （実測ログでも全fail、成功はすべて F0/F0.5/F1 クロップ入力の
                         // matrix-located）。位置喪失時の保険として 1/6 フレームまで間引き、
                         // 回転変種とフル解像度は撤去。BD detect も 1/2 フレームに間引いて
                         // フレーム回転率を上げる（良フレーム到達を早める）。
