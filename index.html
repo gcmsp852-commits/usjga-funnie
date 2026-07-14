@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader2</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -328,6 +328,9 @@
             <div id="newColorCreationDateCard" class="qr-data-card" style="border-color: #81C784; display:none;">
                 <label style="color:#81C784;">QRツイン作成日時</label>
                 <div class="text" id="newColorCreationDateText">-</div>
+            </div>
+            <div id="newColorImageContainer" style="margin-top:12px; text-align:center; display:none;">
+                <img id="newColorImage" style="max-width:100%; max-height:240px; border-radius:8px; border:2px solid #555;" />
             </div>
             <div id="newColorResultActions">
                 <button class="btn" style="background-color:#6A1B9A;" onclick="restartScan()">もう一度スキャン</button>
@@ -4502,6 +4505,26 @@
             renderResultText(textId, formatCreationDateTimeExt32(ext32));
         }
 
+        function renderImageDataId(containerId, imageId, imageDataId, hasImageDataId) {
+            const container = document.getElementById(containerId);
+            const image = document.getElementById(imageId);
+            if (!container || !image) return;
+
+            const id = Number(imageDataId);
+            if (hasImageDataId && Number.isInteger(id) && id >= 1 && id <= 10) {
+                image.onerror = function() { container.style.display = 'none'; };
+                image.src = 'ID' + id + '.png';
+                image.alt = '画像データ ID' + id;
+                container.style.display = '';
+                return;
+            }
+
+            image.onerror = null;
+            image.removeAttribute('src');
+            image.alt = '';
+            container.style.display = 'none';
+        }
+
         function buildDigitalSignatureMessage(result) {
             const hasImageDataId = !!result.hasImageDataId;
             if (hasImageDataId) {
@@ -8276,6 +8299,12 @@
             renderResultText('newColorRes4', q4Text || null, '(未読取)');
             renderResultText('newColorResCombined', combinedText || null);
             renderCreationDateCard('newColorCreationDateCard', 'newColorCreationDateText', creationDateExt32);
+            renderImageDataId(
+                'newColorImageContainer',
+                'newColorImage',
+                q1Meta ? q1Meta.managementExt32 : null,
+                !!(mgmtInfo && mgmtInfo.hasImageId)
+            );
 
             markScanCompleted(isNewColorStageComplete(qRegionMeta, mgmtInfo) ? 'completed' : 'incomplete');
             twinReadStartedAt = 0;
