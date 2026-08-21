@@ -479,19 +479,16 @@ function scan(matrix, options) {
         if (!res) {
             return null;
         }
-        var mc32 = null;
-        if (res.managementCode32 !== undefined && res.managementCode32 !== null) {
-            mc32 = res.managementCode32 >>> 0;
+        // ★Ver3.1：論理QR番号(qrNo)は管理部48ビットの先頭3ビット。
+        //   旧32ビット版の「先頭2ビット」から幅が変わっているので注意。
+        if (typeof res.managementBits48 === "string" && res.managementBits48.length === 48) {
+            return parseInt(res.managementBits48.substr(0, 3), 2);
         }
-        else if (res.managementCode !== undefined && res.managementCode !== null) {
-            var high = res.managementCode & 0xFFFF;
-            var low = res.managementFlags16 !== undefined && res.managementFlags16 !== null ? res.managementFlags16 & 0xFFFF : 0;
-            mc32 = (((high << 16) | low) >>> 0);
+        // managementCode には管理部の上位32ビットが入る（hi16<<16 | mid16）
+        if (res.managementCode !== undefined && res.managementCode !== null) {
+            return ((res.managementCode >>> 0) >>> 29) & 0x7;
         }
-        if (mc32 === null) {
-            return null;
-        }
-        return (mc32 >>> 30) & 0x3;
+        return null;
     };
     var acceptsDecoded = function (res) {
         if (!res || res.isRaw) {
@@ -562,6 +559,15 @@ function scan(matrix, options) {
                     managementCode: decoded.managementCode,
                     managementCode32: decoded.managementCode32,
                     managementFlags16: decoded.managementFlags16,
+                    managementBits48: decoded.managementBits48,
+                    dataPosition: decoded.dataPosition,
+                    webDataIdExt32: decoded.webDataIdExt32,
+                    paddingExt: decoded.paddingExt,
+                    paddingExtBytes: decoded.paddingExtBytes,
+                    monoRegion2Bytes: decoded.monoRegion2Bytes,
+                    webDataKind: decoded.webDataKind,
+                    imageIdExt32: decoded.imageIdExt32,
+                    userIdExt32: decoded.userIdExt32,
                     creationDateTimeExt32: decoded.creationDateTimeExt32,
                     managementExt32: decoded.managementExt32,
                     expiryExt32: decoded.expiryExt32,
@@ -627,6 +633,7 @@ function jsQR(data, width, height, providedOptions) {
     var options = {
         inversionAttempts: providedOptions.inversionAttempts || defaultOptions.inversionAttempts,
         appEncMask: providedOptions.appEncMask,
+        reverseDataBits: providedOptions.reverseDataBits,
         extractRawOnly: providedOptions.extractRawOnly,
         multi: providedOptions.multi,
         extractRawForFailed: providedOptions.extractRawForFailed,
@@ -789,6 +796,15 @@ function buildDirectDecodeResult(decoded, matrix) {
         managementCode: decoded.managementCode,
         managementCode32: decoded.managementCode32,
         managementFlags16: decoded.managementFlags16,
+        managementBits48: decoded.managementBits48,
+        dataPosition: decoded.dataPosition,
+        webDataIdExt32: decoded.webDataIdExt32,
+        paddingExt: decoded.paddingExt,
+        paddingExtBytes: decoded.paddingExtBytes,
+        monoRegion2Bytes: decoded.monoRegion2Bytes,
+        webDataKind: decoded.webDataKind,
+        imageIdExt32: decoded.imageIdExt32,
+        userIdExt32: decoded.userIdExt32,
         creationDateTimeExt32: decoded.creationDateTimeExt32,
         managementExt32: decoded.managementExt32,
         expiryExt32: decoded.expiryExt32,
@@ -828,6 +844,25 @@ jsQR.resumeDecode = function (rawData, appMask) {
     if (!rawData)
         return null;
     return decoder_1.resumeDecode(rawData, appMask);
+};
+// ★ 同一データQRツインのRSブロック単位フォールバック復号
+jsQR.decodeTwinCombined = function (rawA, rawB, options) {
+    if (!rawA || !rawB)
+        return null;
+    return decoder_1.decodeTwinCombined(rawA, rawB, options);
+};
+// ★Ver3.1：モジュール行列から型式情報（誤り訂正レベル・マスク番号）だけを読む。
+//   単一4色QR(1001)の逆順プレーンを読み戻すために使う。
+jsQR.readMatrixFormat = function (moduleMatrix) {
+    var matrix = buildModuleBitMatrix(moduleMatrix);
+    if (!matrix) return null;
+    return decoder_1.readMatrixFormatInformation(matrix);
+};
+// ★ 消失位置を指定できるRS復号（検証・診断用に公開）
+jsQR.decodeWithErasures = function (bytes, twoS, erasurePositions) {
+    if (!bytes)
+        return null;
+    return decoder_1.decodeWithErasures(bytes, twoS, erasurePositions);
 };
 exports.default = jsQR;
 
@@ -1620,6 +1655,22 @@ function decodeMatrix(matrix, options) {
                 decodeBytes[di] = resultBytes[di] ^ (appEncMask[di] & 0xFF);
             }
         }
+        // ★同一データ4色QRの第2LQR（仕様書 6.2）。
+        //   生成側は「データ部のビット列を逆順にしてから RS ECC を作る」ので、
+        //   RS訂正で得られたデータ部を元の並びへ戻してから解釈する。
+        //   セル配置の逆転（ステップ3〜4）は呼び出し側が戻してから渡してくる。
+        if (options && options.reverseDataBits) {
+            var rn = decodeBytes.length;
+            var rout = new Uint8ClampedArray(rn);
+            for (var rbi = 0; rbi < rn; rbi++) {
+                var rbv = decodeBytes[rn - 1 - rbi] & 0xFF;
+                rbv = ((rbv & 0xF0) >> 4) | ((rbv & 0x0F) << 4);
+                rbv = ((rbv & 0xCC) >> 2) | ((rbv & 0x33) << 2);
+                rbv = ((rbv & 0xAA) >> 1) | ((rbv & 0x55) << 1);
+                rout[rbi] = rbv & 0xFF;
+            }
+            decodeBytes = rout;
+        }
         var res = decodeData_1.decode(decodeBytes, version.versionNumber);
         pushDebugProbe(options, "decode_success", {
             stage: "decode_success",
@@ -1633,6 +1684,9 @@ function decodeMatrix(matrix, options) {
         });
         res.version = version;
         res.versionNumber = version.versionNumber;
+        // ★Ver3.1：正常復号のときだけ formatInfo を載せ忘れており（isRaw 側は載せていた）、
+        //   読取ログの配置情報が常に mask=null / EC=? になっていた。
+        res.formatInfo = formatInfo;
         res.codewords = correctedCodewords; // ★ RS訂正済み再インタリーブコード語
         res.dataBytes = Array.from(decodeBytes); // ★ RS訂正済みデータバイト（ECC除く）
         if (appEncMask && appEncMask.length > 0) {
@@ -1696,6 +1750,18 @@ function decode(matrix, options) {
     return decodeMatrix(matrix, options);
 }
 exports.decode = decode;
+// ★Ver3.1：型式情報（誤り訂正レベル・マスク番号）だけを読む。
+//   4色QRコード(1001)の第2プレーンは走査順を逆に詰めてあり、
+//   読取側で並べ直すのにマスク番号が要る。マスクは位置依存なので
+//   「マスク解除 → 並べ直し → マスク再適用」の手順を踏む必要がある。
+exports.readMatrixFormatInformation = function (matrix) {
+    try {
+        return readFormatInformation(matrix) || null;
+    }
+    catch (e) {
+        return null;
+    }
+};
 // ★ 新設：保存しておいたRAWデータとマスクから処理を再開する関数
 function resumeDecode(rawData, appMask) {
     try {
@@ -1750,6 +1816,297 @@ function resumeDecode(rawData, appMask) {
     }
 }
 exports.resumeDecode = resumeDecode;
+// ★ 消失位置を指定できるRS復号の再公開（jsQR本体は reedsolomon を直接importしていないため）
+function decodeWithErasures(bytes, twoS, erasurePositions) {
+    return reedsolomon_1.decodeWithErasures(bytes, twoS, erasurePositions);
+}
+exports.decodeWithErasures = decodeWithErasures;
+// ★ 2つのバイト列の先頭 len バイトのうち、値が異なる個数を数える
+function countByteDiff(a, b, len) {
+    var n = 0;
+    for (var i = 0; i < len; i++) {
+        if (a[i] !== b[i]) {
+            n++;
+        }
+    }
+    return n;
+}
+// ★ 新設：同一データQRツインの「RSブロック単位フォールバック復号」
+// 2枚とも単独ではRS訂正が通らない場合に、両者の訂正前コード語をRSブロック単位で
+// 突き合わせ、ブロックごとに訂正が通った方を採用して1つのデータを組み立てる。
+// 同一データツイン（sameDataFlag）は2枚が完全に同一シンボルであることが前提。
+// rawA / rawB は jsQR(..., { extractRawOnly: true, multi: true }) が返す
+// { isRaw, codewords, version, formatInfo, location } 形式のオブジェクト。
+function decodeTwinCombined(rawA, rawB, options) {
+    try {
+        if (!rawA || !rawB) {
+            return null;
+        }
+        var cwA = rawA.codewords, cwB = rawB.codewords;
+        var versionA = rawA.version, versionB = rawB.version;
+        var fmtA = rawA.formatInfo, fmtB = rawB.formatInfo;
+        if (!cwA || !cwB || !versionA || !versionB || !fmtA || !fmtB) {
+            return null;
+        }
+        // 型番・ECレベルが一致しない2枚は同一データツインではない
+        if (versionA.versionNumber !== versionB.versionNumber) {
+            return null;
+        }
+        var ecLevel = fmtA.errorCorrectionLevel;
+        if (ecLevel !== fmtB.errorCorrectionLevel) {
+            return null;
+        }
+        var blocksA = getDataBlocks(cwA, versionA, ecLevel);
+        var blocksB = getDataBlocks(cwB, versionB, ecLevel);
+        if (!blocksA || !blocksB || blocksA.length !== blocksB.length) {
+            return null;
+        }
+        // ★ A/B間で値が食い違う生コード語の数を数えておく。
+        //   これが 2t 以下なら次段（消失訂正）で確実に救えるため、実測の判断材料になる。
+        var comparedCodewords = Math.min(cwA.length, cwB.length);
+        var mismatchCodewords = 0;
+        for (var ci = 0; ci < comparedCodewords; ci++) {
+            if (cwA[ci] !== cwB[ci]) {
+                mismatchCodewords++;
+            }
+        }
+        var stats = {
+            blockCount: blocksA.length,
+            fromA: 0, fromB: 0, fromMerged: 0,
+            bothOk: 0, agreed: 0, disagreed: 0,
+            onlyA: 0, onlyB: 0, bothFailed: 0,
+            mergedOk: 0, erasuresUsed: 0, maxErasuresInBlock: 0,
+            comparedCodewords: comparedCodewords,
+            mismatchCodewords: mismatchCodewords
+        };
+        // ★同一データツインでない2枚を弾く。
+        //   同一データなら2枚のコード語は本来一致し、差分は読み取り誤りと汚損だけになる。
+        //   内容の異なる第1QR/第2QRを突き合わせると不一致がほぼ全数になり、
+        //   突き合わせても意味がないばかりか、両方が訂正成功したときに
+        //   誤った方を採ってしまう危険がある。
+        var eccTotal = 0;
+        for (var bi0 = 0; bi0 < blocksA.length; bi0++) {
+            eccTotal += blocksA[bi0].codewords.length - blocksA[bi0].numDataCodewords;
+        }
+        if (mismatchCodewords > eccTotal) {
+            if (options && typeof options === "object") {
+                options.twinDiag = {
+                    failReason: "同一データツインではない（不一致" + mismatchCodewords
+                        + " > 訂正余力" + eccTotal + "）",
+                    mismatchCodewords: mismatchCodewords,
+                    comparedCodewords: comparedCodewords,
+                    blockCount: blocksA.length,
+                    bothOk: 0, agreed: 0, disagreed: 0, onlyA: 0, onlyB: 0,
+                    mergedOk: 0, bothFailed: 0
+                };
+            }
+            return null;
+        }
+        var totalBytes = blocksA.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
+        var resultBytes = new Uint8ClampedArray(totalBytes);
+        var resultIndex = 0;
+        var correctedBlocksArr = [];
+        for (var bi = 0; bi < blocksA.length; bi++) {
+            var blkA = blocksA[bi];
+            var blkB = blocksB[bi];
+            // 同一シンボル前提なのでブロック構成は一致するはず。違えば突き合わせ不可。
+            if (blkA.numDataCodewords !== blkB.numDataCodewords ||
+                blkA.codewords.length !== blkB.codewords.length) {
+                return null;
+            }
+            var eccCount = blkA.codewords.length - blkA.numDataCodewords;
+            var corrA = reedsolomon_1.decode(blkA.codewords, eccCount);
+            var corrB = reedsolomon_1.decode(blkB.codewords, eccCount);
+            var chosen = null;
+            if (corrA && corrB) {
+                stats.bothOk++;
+                if (countByteDiff(corrA, corrB, blkA.numDataCodewords) === 0) {
+                    // 両者一致 → 誤訂正の可能性は極めて低い
+                    stats.agreed++;
+                    chosen = corrA;
+                    stats.fromA++;
+                }
+                else {
+                    // ★ 両方「成功」したのに結果が食い違う ＝ 少なくとも一方が誤訂正している。
+                    //   RSは訂正能力を超えると失敗せず誤った値を返すことがあるため、
+                    //   訂正したシンボル数が少ない方（＝訂正能力に余裕がある方）を信頼する。
+                    stats.disagreed++;
+                    var nA = countByteDiff(blkA.codewords, corrA, blkA.codewords.length);
+                    var nB = countByteDiff(blkB.codewords, corrB, blkB.codewords.length);
+                    if (nB < nA) {
+                        chosen = corrB;
+                        stats.fromB++;
+                    }
+                    else {
+                        chosen = corrA;
+                        stats.fromA++;
+                    }
+                }
+            }
+            else if (corrA) {
+                stats.onlyA++;
+                chosen = corrA;
+                stats.fromA++;
+            }
+            else if (corrB) {
+                stats.onlyB++;
+                chosen = corrB;
+                stats.fromB++;
+            }
+            else {
+                // ★ 段階3：A・Bとも単独では訂正できないブロック。
+                //   値が一致するコード語は正しいものとして採用し、食い違うコード語は
+                //   「位置は分かるが値が不明」＝消失としてマークして統合訂正にかける。
+                //   消失は未知の誤りの半分のコストで済むため、
+                //   単独（誤り ≤ ⌊e/2⌋）では手が出なかった汚損量でも復元できる。
+                var mergedBlock = new Uint8ClampedArray(blkA.codewords.length);
+                var erasures = [];
+                for (var ei = 0; ei < blkA.codewords.length; ei++) {
+                    if (blkA.codewords[ei] === blkB.codewords[ei]) {
+                        mergedBlock[ei] = blkA.codewords[ei];
+                    }
+                    else {
+                        mergedBlock[ei] = 0;
+                        erasures.push(ei);
+                    }
+                }
+                var corrMerged = reedsolomon_1.decodeWithErasures(mergedBlock, eccCount, erasures);
+                if (corrMerged) {
+                    stats.fromMerged++;
+                    stats.mergedOk++;
+                    stats.erasuresUsed += erasures.length;
+                    if (erasures.length > stats.maxErasuresInBlock) {
+                        stats.maxErasuresInBlock = erasures.length;
+                    }
+                    chosen = corrMerged;
+                }
+                else {
+                    // 統合訂正でも復元できなければ、このブロックは組み立て不能
+                    stats.bothFailed++;
+                    // ★ 失敗理由を呼び出し側へ返す（null を返すため戻り値では伝えられない）
+                    stats.failReason = "ブロック" + bi + "が復元不可: 消失" + erasures.length
+                        + " / ECC" + eccCount + " (消失は最大" + eccCount + "まで訂正可)";
+                    stats.failBlockIndex = bi;
+                    stats.failBlockErasures = erasures.length;
+                    stats.failBlockEcc = eccCount;
+                    // ★ このブロックがそれぞれ何個ぐらい誤っているかを推定する。
+                    //   汚損していない側まで訂正上限を超えていれば、原因は撮影品質。
+                    if (reedsolomon_1.diagnose) {
+                        var dgA = reedsolomon_1.diagnose(blkA.codewords, eccCount);
+                        var dgB = reedsolomon_1.diagnose(blkB.codewords, eccCount);
+                        stats.failBlockErrA = dgA ? dgA.errorLocatorDegree : null;
+                        stats.failBlockErrB = dgB ? dgB.errorLocatorDegree : null;
+                        stats.failBlockCorrectable = dgA ? dgA.correctableSymbols : Math.floor(eccCount / 2);
+                    }
+                    if (options && typeof options === "object") options.twinDiag = stats;
+                    pushDebugProbe(options, "twin_block_failed", {
+                        stage: "twin_combine",
+                        versionNumber: versionA.versionNumber,
+                        ecLevel: ecLevel,
+                        blockIndex: bi,
+                        blockCount: blocksA.length,
+                        eccCodewords: eccCount,
+                        correctableSymbols: Math.floor(eccCount / 2),
+                        blockErasures: erasures.length,
+                        comparedCodewords: comparedCodewords,
+                        mismatchCodewords: mismatchCodewords
+                    });
+                    return null;
+                }
+            }
+            correctedBlocksArr.push(chosen);
+            for (var i = 0; i < blkA.numDataCodewords; i++) {
+                resultBytes[resultIndex++] = chosen[i];
+            }
+        }
+        // ★ decodeMatrix と同じ手順で訂正済みブロックを再インタリーブし、
+        //   結果オブジェクトの形（res.codewords）を通常復号時と揃える。
+        var ecInfo = versionA.errorCorrectionLevels[ecLevel];
+        var totalCodewords = 0;
+        ecInfo.ecBlocks.forEach(function (block) {
+            totalCodewords += block.numBlocks * (block.dataCodewordsPerBlock + ecInfo.ecCodewordsPerBlock);
+        });
+        var shortBlockDataSize = ecInfo.ecBlocks[0].dataCodewordsPerBlock;
+        var smallBlockCount = ecInfo.ecBlocks[0].numBlocks;
+        var hasLongBlocks = ecInfo.ecBlocks.length > 1;
+        var numBlocks = correctedBlocksArr.length;
+        var correctedCodewords = new Array(totalCodewords);
+        var wi = 0;
+        var blockPos = [];
+        for (var bp = 0; bp < numBlocks; bp++) {
+            blockPos[bp] = 0;
+        }
+        for (var si = 0; si < shortBlockDataSize; si++) {
+            for (var sb = 0; sb < numBlocks; sb++) {
+                correctedCodewords[wi++] = correctedBlocksArr[sb][blockPos[sb]++];
+            }
+        }
+        if (hasLongBlocks) {
+            for (var lb = smallBlockCount; lb < numBlocks; lb++) {
+                correctedCodewords[wi++] = correctedBlocksArr[lb][blockPos[lb]++];
+            }
+        }
+        while (wi < totalCodewords) {
+            for (var eb = 0; eb < numBlocks; eb++) {
+                correctedCodewords[wi++] = correctedBlocksArr[eb][blockPos[eb]++];
+            }
+        }
+        // ★ ユーザ暗号化は decodeMatrix と同じくRS訂正後のデータ部にだけXORを適用する
+        var appEncMask = options ? options.appEncMask : undefined;
+        var encryptedDataBytes = Array.from(resultBytes);
+        var decodeBytes = resultBytes;
+        if (appEncMask && appEncMask.length > 0) {
+            decodeBytes = new Uint8ClampedArray(totalBytes);
+            for (var di = 0; di < totalBytes; di++) {
+                decodeBytes[di] = resultBytes[di] ^ (appEncMask[di] & 0xFF);
+            }
+        }
+        var res = decodeData_1.decode(decodeBytes, versionA.versionNumber);
+        if (!res) {
+            // 全ブロックの訂正は通ったが、組み立てたバイト列が復号できなかった
+            stats.failReason = "全ブロック訂正成功だがデータ復号に失敗（誤訂正の疑い）";
+            if (options && typeof options === "object") options.twinDiag = stats;
+            return null;
+        }
+        res.version = versionA;
+        res.versionNumber = versionA.versionNumber;
+        res.codewords = correctedCodewords;
+        res.dataBytes = Array.from(decodeBytes);
+        // ★ decodeData の戻り値は text / bytes 名義。通常経路（jsQR本体）が行っている
+        //   data / binaryData へのマッピングを、直接呼び出しでも成立するようここで行う。
+        res.data = res.text;
+        res.binaryData = res.bytes;
+        // ★ 読取側の buildPatternInfo が マスク/ECレベル の表示に使う
+        res.formatInfo = fmtA;
+        if (appEncMask && appEncMask.length > 0) {
+            res.appEncDataBytesEncrypted = encryptedDataBytes;
+        }
+        res.location = rawA.location || rawB.location;
+        res.twinCombined = stats;
+        pushDebugProbe(options, "twin_combined_success", {
+            stage: "twin_combine",
+            versionNumber: versionA.versionNumber,
+            ecLevel: ecLevel,
+            blockCount: stats.blockCount,
+            fromA: stats.fromA,
+            fromB: stats.fromB,
+            fromMerged: stats.fromMerged,
+            agreed: stats.agreed,
+            disagreed: stats.disagreed,
+            onlyA: stats.onlyA,
+            onlyB: stats.onlyB,
+            erasuresUsed: stats.erasuresUsed,
+            maxErasuresInBlock: stats.maxErasuresInBlock,
+            comparedCodewords: comparedCodewords,
+            mismatchCodewords: mismatchCodewords
+        });
+        return res;
+    }
+    catch (e) {
+        return null;
+    }
+}
+exports.decodeTwinCombined = decodeTwinCombined;
 
 
 /***/ }),
@@ -1900,52 +2257,101 @@ function decode(data, version) {
         if (mode === ModeByte.Terminator) {
             // ★ ここから書き換え！ ★
             // 管理部16bit + 終端4bit (合計20bit) が残っているか確認
-            if (stream.available() >= 20) {
-                // 管理部16ビットを読み取って result に保存
-                var managementHigh16 = stream.readBits(16);
-                var managementLow16 = stream.available() >= 16 ? stream.readBits(16) : 0;
-                result.managementCode = managementHigh16;
-                result.managementCode32 = (((managementHigh16 & 0xFFFF) << 16) | (managementLow16 & 0xFFFF)) >>> 0;
-                result.managementFlags16 = managementLow16 & 0xFFFF;
-                result.readLimitBits = (result.managementFlags16 >>> 2) & 0x3;
-                var extBlockCount = 0;
-                if ((result.managementFlags16 & 0x0200) !== 0) extBlockCount++;
-                if ((result.managementFlags16 & 0x0100) !== 0) extBlockCount++;
-                if ((result.managementFlags16 & 0x0080) !== 0) extBlockCount++;
-                if ((result.managementFlags16 & 0x0040) !== 0) extBlockCount++;
-                var hasLocation = (result.managementFlags16 & 0x0020) !== 0;
-                var hasMunicipality = (result.managementFlags16 & 0x0010) !== 0;
-                var qrNo = (managementHigh16 >>> 14) & 0x3;
-                var hasReadLimit = result.readLimitBits !== 0 && qrNo === 0;
-                var extBitsNeeded = extBlockCount * 32 + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0) + (hasReadLimit ? 8 : 0) + 4;
-                if ((extBlockCount > 0 || hasLocation || hasMunicipality || hasReadLimit) && stream.available() >= extBitsNeeded) {
-                    if ((result.managementFlags16 & 0x0200) !== 0) {
-                        result.creationDateTimeExt32 = stream.readBits(32);
-                    }
-                    if ((result.managementFlags16 & 0x0100) !== 0) {
-                        result.expiryExt32 = stream.readBits(32);
-                    }
-                    if ((result.managementFlags16 & 0x0080) !== 0) {
-                        result.readerIdExt32 = stream.readBits(32);
-                    }
-                    if ((result.managementFlags16 & 0x0040) !== 0) {
-                        result.managementExt32 = stream.readBits(32);
-                    }
+            // ★Ver3.1：管理部48ビット（16ビット×3）＋拡張管理部
+            //   フィールド定義は qrtwin-mgmt48.js と一致させること。
+            //   拡張管理部は「管理部のビット位置が早い順に固定幅で連結」の規則で並ぶ。
+            if (stream.available() >= 52) {   // 管理部48 + 終端4
+                var pad16 = function (v) { return ("0000000000000000" + (v >>> 0).toString(2)).slice(-16); };
+                var mgHi = stream.readBits(16);
+                var mgMid = stream.available() >= 16 ? stream.readBits(16) : 0;
+                var mgLo = stream.available() >= 16 ? stream.readBits(16) : 0;
+                var B = pad16(mgHi) + pad16(mgMid) + pad16(mgLo);
+                var seg = function (pos, w) { return parseInt(B.substr(pos - 1, w), 2); };
+                result.managementBits48 = B;
+                // ★managementCode に上位32ビット（hi16<<16|mid16）を、
+                //   managementFlags16 に下位16ビットを入れる。
+                //   読取側は既存の (managementCode, managementFlags16) の2引数のまま
+                //   48ビット全体を受け取れるので、呼び出し箇所の改修が不要になる。
+                result.managementCode = (((mgHi & 0xFFFF) << 16) | (mgMid & 0xFFFF)) >>> 0;
+                result.managementHigh16 = mgHi;
+                result.managementMid16 = mgMid;
+                result.managementFlags16 = mgLo & 0xFFFF;
+                // --- 管理部のフィールド展開（位置は仕様書の1始まり表記） ---
+                result.qrNo = seg(1, 3);
+                result.systemStruBits = seg(4, 4);
+                result.colorSpec1 = seg(8, 8);
+                result.colorSpec2 = seg(16, 8);
+                result.dataCompBits = seg(24, 3);
+                result.dataPosition = seg(27, 2);
+                result.webDataKind = seg(29, 3);
+                result.sameDataFlag = seg(32, 1) === 1;
+                result.sysEncFlag = seg(33, 1) === 1;
+                result.appEncFlag = seg(34, 1) === 1;
+                var hasDateTime     = seg(35, 1) === 1;
+                var hasExpiry       = seg(36, 1) === 1;
+                var hasReaderId     = seg(37, 1) === 1;
+                var hasImageId      = seg(38, 1) === 1;
+                var hasLocation     = seg(39, 1) === 1;
+                var hasMunicipality = seg(40, 1) === 1;
+                result.readLimitBits = seg(41, 2);
+                var userIdBit = seg(43, 1) === 1;
+                result.paddingExt = seg(44, 2);
+                // --- 拡張管理部 ---
+                var hasUniqueId = result.readLimitBits !== 0;
+                // ★WEBデータID（32ビット）。dataPosition が 00 以外のときだけ入る。
+                //   拡張管理部は管理部のビット位置が早い順なので、dataPosition(27) は
+                //   hasDateTime(35) より前＝拡張管理部の先頭に来る。
+                var hasWebDataId = result.dataPosition !== 0;
+                var extBitsNeeded = (hasWebDataId ? 32 : 0)
+                    + (hasDateTime ? 32 : 0) + (hasExpiry ? 32 : 0) + (hasReaderId ? 32 : 0)
+                    + (hasImageId ? 32 : 0) + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0)
+                    + (hasUniqueId ? 8 : 0) + (userIdBit ? 32 : 0);
+                if (extBitsNeeded > 0 && stream.available() >= extBitsNeeded) {
+                    if (hasWebDataId) result.webDataIdExt32 = stream.readBits(32);
+                    if (hasDateTime) result.creationDateTimeExt32 = stream.readBits(32);
+                    if (hasExpiry) result.expiryExt32 = stream.readBits(32);
+                    if (hasReaderId) result.readerIdExt32 = stream.readBits(32);
+                    if (hasImageId) result.imageIdExt32 = stream.readBits(32);
                     if (hasLocation) {
                         result.locationLatExt24 = stream.readBits(24);
                         result.locationLonExt24 = stream.readBits(24);
                     }
-                    if (hasMunicipality) {
-                        result.municipalityExt24 = stream.readBits(24);
+                    if (hasMunicipality) result.municipalityExt24 = stream.readBits(24);
+                    if (hasUniqueId) result.qrTwinUniqueId8 = stream.readBits(8);
+                    if (userIdBit) result.userIdExt32 = stream.readBits(32);
+                }
+                // 後ろの終端4ビット(0000)を読み飛ばす
+                if (stream.available() >= 4) stream.readBits(4);
+                // ★埋め草領域拡張（仕様書 8.）。
+                //   paddingExt が 01/10 のとき、片方のLQRの埋め草の手前に
+                //   「長さ16ビット＋本体」で相手の余りデータが入っている。
+                //   自分がその収容先かどうかは qrNo で判る（01→第2LQR / 10→第1LQR）。
+                var padHolder = (result.paddingExt === 1) ? 1 : (result.paddingExt === 2 ? 0 : -1);
+                if (padHolder >= 0 && result.qrNo === padHolder && stream.available() >= 16) {
+                    var padLen = stream.readBits(16);
+                    if (padLen > 0 && stream.available() >= padLen * 8) {
+                        var padBytes = new Array(padLen);
+                        for (var pbi = 0; pbi < padLen; pbi++) padBytes[pbi] = stream.readBits(8) & 0xFF;
+                        result.paddingExtBytes = padBytes;
+                    } else if (padLen === 0) {
+                        result.paddingExtBytes = [];
                     }
-                    if (hasReadLimit) {
-                        result.qrTwinUniqueId8 = stream.readBits(8);
+                }
+                // ★1000（QRコード 白黒）は第2領域そのものが埋草領域に入る。
+                //   仕様書「1000 白黒2色の２領域（埋草領域が第２領域）」。
+                //   書式は埋め草領域拡張と同じ「長さ16ビット＋本体」だが、
+                //   相手のLQRの余りではなく第2領域の中身なので別のキーで返す。
+                //   第2領域が無い個体では、ここは標準の埋め草 0xEC/0x11 なので
+                //   長さが 0xEC11=60433 となり、必ず available() 不足で弾かれる。
+                else if (result.systemStruBits === 8 && stream.available() >= 16) {
+                    var r2Len = stream.readBits(16);
+                    if (r2Len > 0 && stream.available() >= r2Len * 8) {
+                        var r2Bytes = new Array(r2Len);
+                        for (var r2i = 0; r2i < r2Len; r2i++) r2Bytes[r2i] = stream.readBits(8) & 0xFF;
+                        result.monoRegion2Bytes = r2Bytes;
+                    } else if (r2Len === 0) {
+                        result.monoRegion2Bytes = [];
                     }
-                    // 後ろの終端4ビット(0000)を読み飛ばす
-                    stream.readBits(4);
-                } else {
-                    // 後ろの終端4ビット(0000)を読み飛ばす
-                    stream.readBits(4);
                 }
             }
             return result;
@@ -2073,7 +2479,10 @@ var BitStream = /** @class */ (function () {
                 this.bitOffset += numBits;
             }
         }
-        return result;
+        // ★ 32ビットを読むと最上位ビットが符号ビットになり、result が負の数になる
+        //   （例: 0xCAFEBABE → -889275714）。ビット列は常に符号なしなので戻しておく。
+        //   31ビット以下では >>> 0 は何もしないため、他の読み出しには影響しない。
+        return result >>> 0;
     };
     BitStream.prototype.available = function () {
         return 8 * (this.bytes.length - this.byteOffset) - this.bitOffset;
@@ -9258,6 +9667,109 @@ function decode(bytes, twoS) {
     return outputBytes;
 }
 exports.decode = decode;
+// ★ 新設：多項式を x^degreeLimit で打ち切る（mod x^degreeLimit）
+function truncatePoly(field, poly, degreeLimit) {
+    var coeffs = new Uint8ClampedArray(degreeLimit);
+    var maxDegree = poly.degree();
+    for (var d = 0; d < degreeLimit; d++) {
+        coeffs[degreeLimit - 1 - d] = (d <= maxDegree) ? poly.getCoefficient(d) : 0;
+    }
+    return new GenericGFPoly_1.default(field, coeffs);
+}
+// ★ 新設：消失（erasure）位置を指定できるRS復号
+// erasurePositions は bytes 配列上のインデックス（0始まり）。
+// 位置が既知の消失は未知の誤りの半分のコストで済むため、
+//     2 × (未知の誤り数) + (消失数) ≤ twoS
+// を満たす限り復元できる。誤りだけの場合の訂正数 ⌊twoS/2⌋ に対し、
+// 位置がすべて既知なら twoS 個まで訂正できる（＝2倍）。
+function decodeWithErasures(bytes, twoS, erasurePositions) {
+    // 位置の正規化（範囲外・重複を除去）
+    var positions = [];
+    var seen = {};
+    var src = erasurePositions || [];
+    for (var pi = 0; pi < src.length; pi++) {
+        var p = src[pi] | 0;
+        if (p < 0 || p >= bytes.length || seen[p]) {
+            continue;
+        }
+        seen[p] = true;
+        positions.push(p);
+    }
+    if (positions.length === 0) {
+        return decode(bytes, twoS); // 消失がなければ通常の復号と同じ
+    }
+    if (positions.length > twoS) {
+        return null; // 消失だけで訂正能力を超えている
+    }
+    var outputBytes = new Uint8ClampedArray(bytes.length);
+    outputBytes.set(bytes);
+    // 消失位置は値が信用できないので0に潰す（値は未知、位置だけを情報として使う）
+    for (var zi = 0; zi < positions.length; zi++) {
+        outputBytes[positions[zi]] = 0;
+    }
+    var field = new GenericGF_1.default(0x011D, 256, 0);
+    var poly = new GenericGFPoly_1.default(field, outputBytes);
+    var syndromeCoefficients = new Uint8ClampedArray(twoS);
+    var error = false;
+    for (var s = 0; s < twoS; s++) {
+        var evaluation = poly.evaluateAt(field.exp(s + field.generatorBase));
+        syndromeCoefficients[syndromeCoefficients.length - 1 - s] = evaluation;
+        if (evaluation !== 0) {
+            error = true;
+        }
+    }
+    if (!error) {
+        return outputBytes; // 消失位置が0で正しかった（＝既に符号語）
+    }
+    var syndrome = new GenericGFPoly_1.default(field, syndromeCoefficients);
+    // 消失位置多項式 Λ0(x) = Π (1 - Xj x)
+    // Xj = α^(len-1-pos)。既存の decode / findErrorLocations の位置規約に合わせる。
+    var lambda0 = field.one;
+    for (var li = 0; li < positions.length; li++) {
+        var X = field.exp(bytes.length - 1 - positions[li]);
+        // 1 + X·x の係数配列（index0 が最高次）
+        var factor = new GenericGFPoly_1.default(field, Uint8ClampedArray.from([X, 1]));
+        lambda0 = lambda0.multiplyPoly(factor);
+    }
+    // 修正シンドローム T(x) = Λ0(x)·S(x) mod x^twoS
+    var modifiedSyndrome = truncatePoly(field, lambda0.multiplyPoly(syndrome), twoS);
+    if (modifiedSyndrome.isZero()) {
+        // 誤りが消失位置のみに存在する場合。Λ1 = 1, Ω = T = 0 となり訂正量が0になるので、
+        // ここで打ち切って失敗扱いにする（後段の検証でも弾かれる）。
+        return null;
+    }
+    // ユークリッド互除法。停止条件を deg(r) < (twoS + 消失数)/2 にするため R = twoS + 消失数。
+    var sigmaOmega = runEuclideanAlgorithm(field, field.buildMonomial(twoS, 1), modifiedSyndrome, twoS + positions.length);
+    if (sigmaOmega === null) {
+        return null;
+    }
+    var lambda1 = sigmaOmega[0];
+    var omega = sigmaOmega[1];
+    // 全体の誤り位置多項式 Λ(x) = Λ0(x)·Λ1(x)（消失位置＋未知の誤り位置）
+    var lambda = lambda0.multiplyPoly(lambda1);
+    var allLocations = findErrorLocations(field, lambda);
+    if (allLocations == null) {
+        return null;
+    }
+    var magnitudes = findErrorMagnitudes(field, omega, allLocations);
+    for (var mi = 0; mi < allLocations.length; mi++) {
+        var position = outputBytes.length - 1 - field.log(allLocations[mi]);
+        if (position < 0) {
+            return null;
+        }
+        outputBytes[position] = GenericGF_1.addOrSubtractGF(outputBytes[position], magnitudes[mi]);
+    }
+    // ★ 訂正結果の検証：シンドロームが全て0でなければ復元失敗とみなす。
+    //   消失を使うと訂正量が増えるぶん、破綻した解を返さないための保険。
+    var verifyPoly = new GenericGFPoly_1.default(field, outputBytes);
+    for (var vs = 0; vs < twoS; vs++) {
+        if (verifyPoly.evaluateAt(field.exp(vs + field.generatorBase)) !== 0) {
+            return null;
+        }
+    }
+    return outputBytes;
+}
+exports.decodeWithErasures = decodeWithErasures;
 function diagnose(bytes, twoS) {
     var outputBytes = new Uint8ClampedArray(bytes.length);
     outputBytes.set(bytes);
