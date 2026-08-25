@@ -106,7 +106,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader45</div>
+    <div class="header" id="headerText">QR Twin Reader3</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -1194,6 +1194,10 @@
         //   白が 77/81/107 と明暗が逆転し、曖昧セルが 294/841（35%）まで悪化して全領域失敗していた。
         //   60 では通してしまうので、実測の谷間にあたる 150 まで上げる。
         const NEW_COLOR_CALIB_MIN_ANCHOR_DIST = 150;        // 黒白アンカー間の最小距離（未満はマッピング不良とみなす）
+        // ★これを下回る格子は「シンボルに乗っていない」。分類しても必ず失敗するので、
+        //   その画像では色分類自体を打ち切る。実測: 格子が合った第2PQR=294（復号成功）/
+        //   荒い第2PQR=146（失敗）/ 乗っていない第1PQR=1〜48。
+        const NEW_COLOR_GRID_MIN_ANCHOR_DIST = 60;
         // ★Ver3.1：実測ログ（dim=29）では、復号に成功した候補の曖昧セル数は必要領域平均で 0.5〜9、
         //   失敗した候補は 13〜35 と明確に分かれていた。従来の 0.12（=100セル）ではほぼ全候補が
         //   「即復号」に入り、位置検出順のまま悪い候補から総当たりしていた（実測: 本命が5番目）。
@@ -1553,6 +1557,7 @@
             //   最初のフレームから通常QRを取りこぼさないようにする
             bdZeroStreak = 0; bdCallTick = 0; bdSkippedCount = 0;
             newColorLocateMissStreak = 0;   // カラーの位置特定の空振り回数も初期化
+            for (const k of Object.keys(newColorNoCandidateStats)) delete newColorNoCandidateStats[k];
             scanDebugStats = {
                 startedAt: Date.now(),
                 startedPerf: nowPerf(),
@@ -1728,7 +1733,20 @@
             if (!Array.isArray(stats.newColorColorProbes)) stats.newColorColorProbes = [];
             stats.newColorColorProbes.push(probe);
             if (stats.newColorColorProbes.length > 24) {
-                stats.newColorColorProbes = stats.newColorColorProbes.slice(-24);
+                // ★従来は単純に直近24件へ切り詰めていたため、1フレームの中で後から走る工程
+                //   （縮小全画面など）の結果に押し出され、先に走る専用クロップの結果が
+                //   ログから消えていた。どの工程で何が起きたか追えるよう、
+                //   「対象PQR × 入力画像の大きさ」ごとに直近を残す。
+                const byKey = new Map();
+                for (const p of stats.newColorColorProbes) {
+                    const k = (p.targetPqrNo || '?') + '/' + (p.imgW || '?') + 'x' + (p.imgH || '?');
+                    if (!byKey.has(k)) byKey.set(k, []);
+                    byKey.get(k).push(p);
+                }
+                const kept = [];
+                const perKey = Math.max(2, Math.floor(24 / Math.max(1, byKey.size)));
+                for (const arr of byKey.values()) kept.push(...arr.slice(-perKey));
+                stats.newColorColorProbes = kept.slice(-24);
             }
         }
 
@@ -2135,6 +2153,23 @@
             lines.push('');
 
             if (Array.isArray(stats.newColorColorProbes) && stats.newColorColorProbes.length) {
+            {
+                if (newColorQ1RefreshStats.tried) {
+                    const s = newColorQ1RefreshStats;
+                    lines.push('第1PQRの位置を毎フレーム取り直した回数: 試行' + s.tried
+                        + '回 / 成功' + s.ok + '回 / 取り直せず' + s.failed + '回'
+                        + ' / 最初の位置からの最大ずれ ' + Math.round(s.maxDriftPx) + 'px('
+                        + s.maxDriftModules.toFixed(1) + 'モジュール)');
+                    lines.push('');
+                }
+                const noCand = Object.keys(newColorNoCandidateStats);
+                if (noCand.length) {
+                    lines.push('newColor 色分類に入れなかった回（位置特定も種も無い）');
+                    noCand.sort((a, b) => newColorNoCandidateStats[b] - newColorNoCandidateStats[a])
+                        .forEach(k => lines.push('  ' + k + ': ' + newColorNoCandidateStats[k] + '回'));
+                    lines.push('');
+                }
+            }
                 lines.push('newColor color-classify probe');
                 stats.newColorColorProbes.slice(-8).forEach((cp, idx) => {
                     const s = cp.summary || {};
@@ -2147,9 +2182,16 @@
                         ? s.confusionTop.map(x => `${x.pair}:${x.count}`).join(' ')
                         : '-';
                     lines.push(
-                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.seedFallback ? ' seed=1' : ''} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
+                        `  #${idx + 1} loc=${cp.locationIndex}${cp.targetPqrNo ? ' pqr=' + cp.targetPqrNo : ''}${cp.imgW ? ' img=' + cp.imgW + 'x' + cp.imgH : ''}${cp.seedFallback ? ' seed=1' : (cp.seedFromFinders ? ' seed=fp' : '')} dim=${cp.dimension || '-'} fpRank=${cp.fpRank ?? '-'} ` +
                         `sample=${cp.supersampleScale ? cp.supersampleScale + 'x(' + fmtNum(cp.moduleSize) + '->' + fmtNum(cp.effectiveModuleSize) + 'px)' : 'native'} ` +
                         `alignFixed=${cp.alignFixed ? 1 : 0} alignD=${cp.alignD !== null && cp.alignD !== undefined ? fmtNum(cp.alignD) : '-'} ` +
+                        (cp.gridFit ? `grid=${Math.round(cp.gridFit.base)}` +
+                            (cp.gridFit.searched ? `>${Math.round(cp.gridFit.dist)}@${cp.gridFit.dx},${cp.gridFit.dy}` : '') +
+                            // ★採用した格子の黒白アンカー実測値。正しい格子なら黒は最暗・白は最明に寄る。
+                            //   もう一方のシンボルの格子に乗ると両方とも中間調になるので、ここで見分けられる。
+                            ((cp.gridFit.dx || cp.gridFit.dy) && cp.gridFit.dk && cp.gridFit.lt
+                                ? `(黒${cp.gridFit.dk.map(Math.round).join('/')} 白${cp.gridFit.lt.map(Math.round).join('/')})` : '') +
+                            (cp.gridRejected ? '(棄却)' : '') + ' ' : '') +
                         `amb=${s.ambiguousTotal || 0}/${s.totalCells || '-'}(${fmtNum((s.ambiguousPct || 0) * 100)}%) ` +
                         `minMargin=${s.minMargin !== null && s.minMargin !== undefined ? fmtNum(s.minMargin) : '-'} avgMargin=${s.avgMargin !== null && s.avgMargin !== undefined ? fmtNum(s.avgMargin) : '-'} ` +
                         `thrMargin=${s.threshold ? s.threshold.margin : '-'}${s.threshold && s.threshold.rel !== undefined ? '/rel=' + s.threshold.rel : ''} ${regionText} confusion=${confusion}`
@@ -2911,6 +2953,10 @@
                 codewords: res.codewords,
                 dataBytes: res.dataBytes,
                 versionNumber: res.versionNumber,
+                // ★ビデオ座標へ写した location も持たせる。
+                //   四隅だけでなくファインダー中心と位置合わせパターンも入るので、
+                //   第1PQRの色分離が第1QRと同じ精度の格子を使える。
+                location: mapLocationToVideo(L, mapPt),
                 points: [
                     mapPt(L.topLeftCorner.x, L.topLeftCorner.y),
                     mapPt(L.topRightCorner.x, L.topRightCorner.y),
@@ -3363,6 +3409,7 @@
                 if (target !== 'Q2' || !profile || profile.kind !== 'newcolor') return null;
                 const coordinateOptions = buildNewColorCoordinateOptions(w, h, mapPt, rotTag, debugMeta);
                 if (!coordinateOptions) return null;
+                if (debugMeta && debugMeta.onlyPqrNo) coordinateOptions.onlyPqrNo = debugMeta.onlyPqrNo;
                 const q1Data = profile.newColorQ1Data || newColorQ1Data || buildNewColorQ1DataFromFirstQR(profile.newColorMgmtInfo);
                 const mgmt = q1Data && q1Data.mgmtInfo;
                 if (!q1Data || !mgmt) return null;
@@ -3428,7 +3475,7 @@
                                 formatInfo: res.formatInfo
                             },
                             codewords: res.correctedCodewords || res.codewords || null,
-                            location: res.location,
+                            location: mapLocationToVideo(res.location, mapPt),
                             points: pts,
                             center: computeCenterFromPoints(pts)
                         };
@@ -3490,7 +3537,7 @@
                     codewords: res.codewords,
                     dataBytes: res.dataBytes,
                     versionNumber: res.versionNumber,
-                    location: res.location,
+                    location: mapLocationToVideo(res.location, mapPt),
                     points: pts,
                     center: computeCenterFromPoints(pts)
                 };
@@ -3591,6 +3638,33 @@
                         `stage1-bd-other#${ci + 1}`, 0, phase, 'crop',
                         { cropRect: crop });
                     if (hitS1Bd) return hitS1Bd;
+                }
+            }
+
+            // ★第1PQRも色を持つ構成（4色＋4色 / 4色＋8色 / 8色＋8色）専用の工程。
+            //   第1QRは色分離の前に白黒として読めているので、位置は既に確定している。
+            //   その位置をフル解像度で切り出し、第1PQRだけを色分離する。
+            //   ここを共通のはしごに任せると、第1PQRの色判定が縮小画像
+            //   （実機ログでは1モジュール2.8〜6.8px）に回ってしまい、
+            //   重なり部の菱形セルは1セルの半分しか塗られていないので色味が残らない。
+            //   実際、白↔黄・黒↔赤（どちらも第2ビットだけが違う色）の取り違えばかりで、
+            //   第2領域だけが永久に取れなかった。
+            //   第2PQR側は従来どおり共通の幾何クロップで処理する（白黒＋4色と同じ工程）。
+            if (target === 'Q2' && profile.kind === 'newcolor' && profile.firstQrPoints
+                && newColorNeedsPqr1Separation(profile.newColorMgmtInfo)) {
+                const pqr1Box = estimateQ2BBoxFromQ1(profile.firstQrPoints, profile.firstQrVersionNumber, 0);
+                if (pqr1Box) {
+                    recordGeometryCropDebug(pqr1Box, '共通F0b 第1PQRクロップ');
+                    zxingCanvas.width = pqr1Box.sw;
+                    zxingCanvas.height = pqr1Box.sh;
+                    zxingCtx.drawImage(video, pqr1Box.sx, pqr1Box.sy, pqr1Box.sw, pqr1Box.sh,
+                        0, 0, pqr1Box.sw, pqr1Box.sh);
+                    const cd1 = zxingCtx.getImageData(0, 0, pqr1Box.sw, pqr1Box.sh);
+                    markJsQrCropRect(pqr1Box.sx, pqr1Box.sy, pqr1Box.sw, pqr1Box.sh, '共通F0b 第1PQRクロップ');
+                    const hitP1 = tryDecodeNewColor(cd1.data, pqr1Box.sw, pqr1Box.sh,
+                        (x, y) => ({ x: x + pqr1Box.sx, y: y + pqr1Box.sy }), 'pqr1', 0,
+                        '共通F0b 第1PQRクロップ', 'crop', { cropRect: pqr1Box, onlyPqrNo: 1 });
+                    if (hitP1) return hitP1;
                 }
             }
 
@@ -4487,6 +4561,73 @@
         function getFirstQrGeometryForQ2() {
             if (!firstQR) return null;
             return firstQR.points || firstQR.q2SeedPoints || null;
+        }
+
+        // ★第1PQRの格子を毎フレーム取り直す。
+        //   第1QRは1度復号したきりで、その位置を20秒間ずっと使い回していた。
+        //   第2PQRは毎フレーム実画像のファインダーを探し直す（fpRank/alignFixed=1 が付く）ので
+        //   手ぶれに追従するが、第1PQRだけが最初のフレームの位置に固定される。
+        //   実測（4色×4色 試行#3）: BarcodeDetectorの枠が sx=135→227 と92px＝6.8モジュール
+        //   動いているのに、第1PQRのクロップ矩形は sx=48,sy=384 のまま10フレーム不動だった。
+        //   アンカー距離が 19〜159 とフレームごとに乱高下し、補正量も毎回別方向を指すのは、
+        //   ずれの向きが固定ではなく「時間とともに離れていく」ためで、
+        //   サブモジュール補正（±0.25）では原理的に追いつけない。
+        const newColorQ1RefreshStats = { tried: 0, ok: 0, failed: 0, maxDriftPx: 0, maxDriftModules: 0 };
+        function refreshFirstQrGeometryForNewColor(maxDim = 720) {
+            if (!video || !video.videoWidth || !video.videoHeight || !firstQR) return false;
+            if (typeof jsQR !== 'function' || !zxingCanvas || !zxingCtx) return false;
+            newColorQ1RefreshStats.tried++;
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+            const scale = Math.min(1, maxDim / Math.max(vw, vh));
+            const tw = Math.max(1, Math.round(vw * scale));
+            const th = Math.max(1, Math.round(vh * scale));
+            let res = null;
+            try {
+                zxingCanvas.width = tw;
+                zxingCanvas.height = th;
+                zxingCtx.drawImage(video, 0, 0, tw, th);
+                res = jsQR(zxingCtx.getImageData(0, 0, tw, th).data, tw, th);
+            } catch (e) { res = null; }
+            if (!res || !res.location) { newColorQ1RefreshStats.failed++; return false; }
+            // ★取り違え防止: 本文が最初に読んだ第1QRと一致するときだけ採用する。
+            //   QRツインは2枚写っているので、第2PQRを拾って第1PQRの位置として
+            //   使ってしまうと、8.5モジュールずれた格子で色を読むことになる。
+            const prevText = (firstQR.text != null) ? String(firstQR.text) : String(firstQR.data ?? '');
+            if (res.data == null || String(res.data) !== prevText) { newColorQ1RefreshStats.failed++; return false; }
+            const inv = 1 / scale;
+            const loc = mapLocationToVideo(res.location, (x, y) => ({ x: x * inv, y: y * inv }));
+            if (!loc || !loc.topLeftCorner) { newColorQ1RefreshStats.failed++; return false; }
+            const old = firstQR.location && firstQR.location.topLeftCorner;
+            if (old) {
+                // ★同一データツイン（2枚が同じ本文）では本文一致だけでは第2PQRを弾けない。
+                //   第2PQRは第1PQRから 8.5モジュール斜めにずれた位置にあるので、
+                //   そこへ飛んだ候補は取り違えとして捨てる。
+                const modPx = Math.hypot(loc.topRightCorner.x - loc.topLeftCorner.x,
+                    loc.topRightCorner.y - loc.topLeftCorner.y) / Math.max(1, (firstQR.versionNumber || 1) * 4 + 17);
+                if (modPx > 0) {
+                    const dx = loc.topLeftCorner.x - old.x;
+                    const dy = loc.topLeftCorner.y - old.y;
+                    const shift = NEW_COLOR_SHIFT_MODULES * modPx;
+                    if (Math.hypot(dx - shift, dy - shift) < 2 * modPx
+                        || Math.hypot(dx + shift, dy + shift) < 2 * modPx) {
+                        newColorQ1RefreshStats.failed++;
+                        return false;
+                    }
+                }
+                const drift = Math.hypot(loc.topLeftCorner.x - old.x, loc.topLeftCorner.y - old.y);
+                const mod = Math.hypot(loc.topRightCorner.x - loc.topLeftCorner.x,
+                    loc.topRightCorner.y - loc.topLeftCorner.y) / Math.max(1, (firstQR.versionNumber || 1) * 4 + 17);
+                newColorQ1RefreshStats.maxDriftPx = Math.max(newColorQ1RefreshStats.maxDriftPx, drift);
+                if (mod > 0) {
+                    newColorQ1RefreshStats.maxDriftModules =
+                        Math.max(newColorQ1RefreshStats.maxDriftModules, drift / mod);
+                }
+            }
+            firstQR.location = loc;
+            firstQR.points = [loc.topLeftCorner, loc.topRightCorner, loc.bottomRightCorner, loc.bottomLeftCorner];
+            newColorQ1RefreshStats.ok++;
+            return true;
         }
 
         function capturePendingAppEncFrame() {
@@ -6629,6 +6770,28 @@
             };
         }
 
+        // ★jsQR が返す location は「復号した画像の座標系」のまま。
+        //   縮小画像やクロップで復号した場合、そのままではビデオ座標と一致しない。
+        //   points は mapPt で写しているのに location は写していなかったため、
+        //   第1QRの格子を使う処理（第1PQRの色分離）が
+        //   「縮小率だけ掛かってクロップの原点は引かれていない」座標になり、
+        //   実測では ビデオ座標×0.375−38 という二重変換になっていた。
+        function mapLocationToVideo(location, mapPt) {
+            if (!location || typeof mapPt !== 'function') return location || null;
+            const mv = (p) => (p ? mapPt(p.x, p.y) : p);
+            return {
+                ...location,
+                topLeftCorner: mv(location.topLeftCorner),
+                topRightCorner: mv(location.topRightCorner),
+                bottomRightCorner: mv(location.bottomRightCorner),
+                bottomLeftCorner: mv(location.bottomLeftCorner),
+                topLeftFinderPattern: mv(location.topLeftFinderPattern),
+                topRightFinderPattern: mv(location.topRightFinderPattern),
+                bottomLeftFinderPattern: mv(location.bottomLeftFinderPattern),
+                bottomRightAlignmentPattern: mv(location.bottomRightAlignmentPattern)
+            };
+        }
+
         function mapQrResultLocation(qr, mapPoint) {
             if (!qr || !qr.location || typeof mapPoint !== 'function') return qr;
             const movePoint = (point) => point ? mapPoint(point.x, point.y) : point;
@@ -7822,7 +7985,98 @@
         //   mappingFunction はモジュール座標(0..dimension)をピクセルへ写す射影変換で、
         //   jsQR の squareToQuadrilateral と同じ式を使う（モジュール四隅は矩形なので
         //   単位正方形への正規化は 1/dimension の割り算で足りる）。
+        // ★jsQR と同じ射影変換の組み立て。
+        //   単位正方形(0,0)(1,0)(1,1)(0,1) を4点へ写す。
+        function newColorSquareToQuad(p1, p2, p3, p4) {
+            const dx3 = p1.x - p2.x + p3.x - p4.x;
+            const dy3 = p1.y - p2.y + p3.y - p4.y;
+            if (dx3 === 0 && dy3 === 0) {
+                return { a11: p2.x - p1.x, a12: p2.y - p1.y, a13: 0,
+                         a21: p3.x - p2.x, a22: p3.y - p2.y, a23: 0,
+                         a31: p1.x, a32: p1.y, a33: 1 };
+            }
+            const dx1 = p2.x - p3.x, dx2 = p4.x - p3.x;
+            const dy1 = p2.y - p3.y, dy2 = p4.y - p3.y;
+            const den = dx1 * dy2 - dx2 * dy1;
+            if (!den) return null;
+            const a13 = (dx3 * dy2 - dx2 * dy3) / den;
+            const a23 = (dx1 * dy3 - dx3 * dy1) / den;
+            return { a11: p2.x - p1.x + a13 * p2.x, a12: p2.y - p1.y + a13 * p2.y, a13,
+                     a21: p4.x - p1.x + a23 * p4.x, a22: p4.y - p1.y + a23 * p4.y, a23,
+                     a31: p1.x, a32: p1.y, a33: 1 };
+        }
+        function newColorQuadToSquare(p1, p2, p3, p4) {
+            const q = newColorSquareToQuad(p1, p2, p3, p4);
+            if (!q) return null;
+            return {
+                a11: q.a22 * q.a33 - q.a23 * q.a32, a12: q.a13 * q.a32 - q.a12 * q.a33, a13: q.a12 * q.a23 - q.a13 * q.a22,
+                a21: q.a23 * q.a31 - q.a21 * q.a33, a22: q.a11 * q.a33 - q.a13 * q.a31, a23: q.a13 * q.a21 - q.a11 * q.a23,
+                a31: q.a21 * q.a32 - q.a22 * q.a31, a32: q.a12 * q.a31 - q.a11 * q.a32, a33: q.a11 * q.a22 - q.a12 * q.a21
+            };
+        }
+        function newColorMatTimes(a, b) {
+            return {
+                a11: a.a11*b.a11 + a.a21*b.a12 + a.a31*b.a13, a12: a.a12*b.a11 + a.a22*b.a12 + a.a32*b.a13, a13: a.a13*b.a11 + a.a23*b.a12 + a.a33*b.a13,
+                a21: a.a11*b.a21 + a.a21*b.a22 + a.a31*b.a23, a22: a.a12*b.a21 + a.a22*b.a22 + a.a32*b.a23, a23: a.a13*b.a21 + a.a23*b.a22 + a.a33*b.a23,
+                a31: a.a11*b.a31 + a.a21*b.a32 + a.a31*b.a33, a32: a.a12*b.a31 + a.a22*b.a32 + a.a32*b.a33, a33: a.a13*b.a31 + a.a23*b.a32 + a.a33*b.a33
+            };
+        }
+
+        // ★第1QRを読んだときの格子をそのまま作り直す。
+        //   第1PQRも色を持つ構成（4色＋4色 など）では、第2プレーンを読むための位置が要るが、
+        //   カラーの位置特定はこの構成でほぼ空振りする（実機ログ: no_locator 66〜76回）。
+        //   従来はシンボルの四隅だけから写像を組んでいたため、内側ほどズレて
+        //   重なり部の菱形セルの中心を外し、明暗（第1プレーン）は合うのに
+        //   色味（第2プレーン）が潰れていた（実機ログ: 白↔黄・黒↔赤の混同ばかり）。
+        //   jsQR が第1QRの復号に実際に使ったのと同じ4点
+        //   （3つのファインダー中心＋右下の位置合わせパターン）から組み直せば、
+        //   復号できた実績のある格子がそのまま使える。
+        function buildLocInfoFromFinderPatterns(location, versionNumber) {
+            if (!location || !versionNumber) return null;
+            const dimension = 17 + 4 * versionNumber;
+            if (dimension < 21) return null;
+            const fTL = location.topLeftFinderPattern;
+            const fTR = location.topRightFinderPattern;
+            const fBL = location.bottomLeftFinderPattern;
+            if (!fTL || !fTR || !fBL) return null;
+            const align = location.bottomRightAlignmentPattern;
+            const p4 = align || { x: fTR.x + fBL.x - fTL.x, y: fTR.y + fBL.y - fTL.y };
+            const brModule = align ? (dimension - 6.5) : (dimension - 3.5);
+            const qToS = newColorQuadToSquare(
+                { x: 3.5, y: 3.5 }, { x: dimension - 3.5, y: 3.5 },
+                { x: brModule, y: brModule }, { x: 3.5, y: dimension - 3.5 });
+            const sToQ = newColorSquareToQuad(fTL, fTR, p4, fBL);
+            if (!qToS || !sToQ) return null;
+            const t = newColorMatTimes(sToQ, qToS);
+            const mappingFunction = (x, y) => {
+                const den = t.a13 * x + t.a23 * y + t.a33;
+                if (!den) return { x: 0, y: 0 };
+                return { x: (t.a11 * x + t.a21 * y + t.a31) / den,
+                         y: (t.a12 * x + t.a22 * y + t.a32) / den };
+            };
+            const corner = (mx, my) => mappingFunction(mx, my);
+            const side = (Math.hypot(fTR.x - fTL.x, fTR.y - fTL.y) + Math.hypot(fBL.x - fTL.x, fBL.y - fTL.y)) / 2;
+            const moduleSize = side / (dimension - 7);
+            if (!(moduleSize > 0)) return null;
+            return {
+                location: {
+                    topLeftCorner: corner(0, 0), topRightCorner: corner(dimension, 0),
+                    bottomRightCorner: corner(dimension, dimension), bottomLeftCorner: corner(0, dimension),
+                    topLeftFinderPattern: fTL, topRightFinderPattern: fTR,
+                    bottomLeftFinderPattern: fBL, bottomRightAlignmentPattern: align || null
+                },
+                dimension,
+                moduleSize,
+                mappingFunction,
+                probeMeta: { seededFromFirstQr: true, seedFromFinders: true, seedHasAlignment: !!align },
+                inverted: false
+            };
+        }
+
         function buildLocInfoFromKnownCorners(location, versionNumber) {
+            // ファインダー中心と位置合わせパターンが取れているなら、そちらで組む（精度が段違い）
+            const byFinders = buildLocInfoFromFinderPatterns(location, versionNumber);
+            if (byFinders) return byFinders;
             if (!location || !versionNumber) return null;
             const dimension = 17 + 4 * versionNumber;
             if (dimension < 21) return null;
@@ -7884,6 +8138,29 @@
         // ★Ver3.1：格子のセル中心が画像内にどれだけ入っているかを見る。
         //   縮小フレームやクロップでは第1QRが画角の外に出ることがあり、
         //   そのまま色分類すると白セルばかり拾って時間だけ使う（実測: 841中667〜783が白）。
+        // ★格子が画像内に入っている割合。どれくらい外れているのかを数値で残すために分離した。
+        function locInfoInsideRatio(locInfo, width, height) {
+            if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return 0;
+            const n = locInfo.dimension;
+            let inside = 0, total = 0;
+            for (let r = 0; r < n; r += 4) {
+                for (let c = 0; c < n; c += 4) {
+                    const p = locInfo.mappingFunction(c + 0.5, r + 0.5);
+                    total++;
+                    if (p.x >= 0 && p.y >= 0 && p.x < width && p.y < height) inside++;
+                }
+            }
+            return total > 0 ? (inside / total) : 0;
+        }
+        /** 格子の四隅を「x,y→x,y」の形にする（プローブ表示用） */
+        function locInfoRangeText(locInfo) {
+            if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return '-';
+            const n = locInfo.dimension;
+            const a = locInfo.mappingFunction(0, 0);
+            const b = locInfo.mappingFunction(n, n);
+            return Math.round(a.x) + ',' + Math.round(a.y) + '→' + Math.round(b.x) + ',' + Math.round(b.y);
+        }
+
         function isLocInfoMostlyInside(locInfo, width, height, minRatio = 0.9) {
             if (!locInfo || !locInfo.mappingFunction || !locInfo.dimension) return false;
             const n = locInfo.dimension;
@@ -8558,6 +8835,13 @@
         //   パレットはデータセルと同一インク・同一照明・同一ボケなので、実測すれば
         //   印刷やディスプレイの発色差に依らず分類セントロイドを現物合わせできる。
         let newColorPaletteLastReason = '';                 // 直近のパレット棄却理由（calib行の pal=0(...) 表示用）
+        // ★カラー分離が「1枚も色分類できずに終わった」回を理由別に数える。
+        //   位置特定も種も無いと、その画像では何も試さずに戻るため、
+        //   従来はログに痕跡が残らず、どの画像で何が起きたのか追えなかった。
+        const newColorNoCandidateStats = Object.create(null);
+        function recordNewColorNoCandidate(key) {
+            newColorNoCandidateStats[key] = (newColorNoCandidateStats[key] || 0) + 1;
+        }
         // ★カラーの位置特定が連続で空振りした回数。
         //   Stage3の BarcodeDetector は「位置を見失ったときの保険」なので、
         //   位置が取れている間は呼ばない判断に使う（実測でBDは第2QRの取得に一度も寄与していない）。
@@ -8701,28 +8985,60 @@
         //   3) EM反復で全セルからセントロイドを適応（黒白はアンカー固定）
         //   戻り値の classifyRgb は最近傍セントロイド分類と
         //   「セントロイド間距離に対する相対マージン」を返す。
+        // ★適応色較正の棄却理由と、そのときの黒白アンカー実測値。
+        //   較正が効かないと固定の理想色（黒0/0/0・赤255/0/0・黄255/215/0・白255/255/255）で
+        //   分類することになり、カメラ実測（黒26/26/26〜白209/209/209）とは別物なので
+        //   彩度だけで決まるプレーン（黒赤黄白なら第2プレーン＝黒黄 対 赤白）が丸ごと壊れる。
+        let newColorCalibLastReject = '';
+        let newColorCalibAnchorDebug = '';
         function buildNewColorAdaptiveCalibration(cellRgb, hasSample, n, decoder, regionCount) {
+            newColorCalibLastReject = '';
+            newColorCalibAnchorDebug = '';
             const candidates = decoder && decoder.candidates ? decoder.candidates : null;
-            if (!cellRgb || !candidates || candidates.length < 2) return null;
+            if (!cellRgb || !candidates || candidates.length < 2) {
+                newColorCalibLastReject = 'no_candidates';
+                return null;
+            }
             const { darkName, lightName } = getNewColorAnchorNames(decoder, regionCount);
-            if (!darkName || !lightName) return null;
+            if (!darkName || !lightName) {
+                newColorCalibLastReject = 'no_anchor_name';
+                return null;
+            }
             const anchors = getNewColorFunctionCellAnchors(n);
             const darkAnchor = newColorRobustCentroid(cellRgb, hasSample, anchors.darkIdx);
             const lightAnchor = newColorRobustCentroid(cellRgb, hasSample, anchors.lightIdx);
-            if (!darkAnchor || !lightAnchor) return null;
+            if (!darkAnchor || !lightAnchor) {
+                newColorCalibLastReject = 'no_anchor_cells';
+                return null;
+            }
             const anchorDist = Math.hypot(
                 lightAnchor.r - darkAnchor.r,
                 lightAnchor.g - darkAnchor.g,
                 lightAnchor.b - darkAnchor.b
             );
+            // ★棄却時の実測値を必ず残す。従来は null を返すだけで、ログには
+            //   calib 行が一切出ず「なぜ固定プロファイルへ後退したのか」が追えなかった。
+            //   格子が半モジュールずれると黒白アンカーが灰色へ寄って dist が潰れる
+            //   （合成検証: ずれ0→dist 317 / ずれ0.5モジュール→dist 45・明暗反転）ので、
+            //   この2つの数値だけで「色の問題」か「格子の問題」かを切り分けられる。
+            newColorCalibAnchorDebug = 'ancDk=' + darkAnchor.count + '(' + Math.round(darkAnchor.r) + '/'
+                + Math.round(darkAnchor.g) + '/' + Math.round(darkAnchor.b) + ') ancLt=' + lightAnchor.count
+                + '(' + Math.round(lightAnchor.r) + '/' + Math.round(lightAnchor.g) + '/'
+                + Math.round(lightAnchor.b) + ') ancDist=' + Math.round(anchorDist);
             // アンカーが分離していない＝マッピング不良。適応せず従来分類に任せる。
-            if (anchorDist < NEW_COLOR_CALIB_MIN_ANCHOR_DIST) return null;
+            if (anchorDist < NEW_COLOR_CALIB_MIN_ANCHOR_DIST) {
+                newColorCalibLastReject = 'anchor_dist<' + NEW_COLOR_CALIB_MIN_ANCHOR_DIST;
+                return null;
+            }
             // ★Ver3.1：明暗の逆転も弾く。実測ログでは暗アンカーが 141/131/141、
             //   明アンカーが 77/81/107 と逆転したフレームがあり、そのまま較正すると
             //   全セルの分類が反転して曖昧セルが35%まで悪化していた（黄と黒の混同167セル）。
             //   距離だけでは符号を見ないので、輝度の大小関係を明示的に確かめる。
             const anchorLuma = (a) => 0.299 * a.r + 0.587 * a.g + 0.114 * a.b;
-            if (anchorLuma(darkAnchor) >= anchorLuma(lightAnchor)) return null;
+            if (anchorLuma(darkAnchor) >= anchorLuma(lightAnchor)) {
+                newColorCalibLastReject = 'anchor_inverted';
+                return null;
+            }
 
             const total = n * n;
             const centroids = {};
@@ -9034,12 +9350,96 @@
             };
         }
 
+        // ★格子が本当にシンボルへ乗っているかを、復号せずに測る物差し。
+        //   機能パターン（位置検出・分離帯・タイミング・アライメント）は必ず黒か白なので、
+        //   格子が合っていれば黒アンカーと白アンカーは大きく離れる。ずれていると
+        //   両方ともデータセルの平均色（実測: 130/85/44 のオレンジ）や
+        //   余白の白（実測: 200/196/196）へ寄り、距離がほぼ0まで潰れる。
+        function measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, offX, offY) {
+            const anchors = getNewColorFunctionCellAnchors(n);
+            const med = (idxList) => {
+                const hR = new Uint16Array(256);
+                const hG = new Uint16Array(256);
+                const hB = new Uint16Array(256);
+                let count = 0;
+                for (const cellIdx of idxList) {
+                    const r = (cellIdx / n) | 0;
+                    const c = cellIdx % n;
+                    const p = locationInfo.mappingFunction(c + 0.5 + offX, r + 0.5 + offY);
+                    if (!p || p.x < 0 || p.y < 0 || p.x >= width || p.y >= height) continue;
+                    const rgb = averageRgbSample(src, width, height, p.x, p.y, radius);
+                    hR[rgb.r]++;
+                    hG[rgb.g]++;
+                    hB[rgb.b]++;
+                    count++;
+                }
+                if (count < 4) return null;
+                return [
+                    newColorHistogramMedian(hR, count),
+                    newColorHistogramMedian(hG, count),
+                    newColorHistogramMedian(hB, count)
+                ];
+            };
+            const dk = med(anchors.darkIdx);
+            const lt = med(anchors.lightIdx);
+            if (!dk || !lt) return { dist: 0, dk: null, lt: null };
+            const luma = (a) => 0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2];
+            // 明暗が逆転している格子は論外
+            if (luma(dk) >= luma(lt)) return { dist: 0, dk, lt };
+            return { dist: Math.hypot(lt[0] - dk[0], lt[1] - dk[1], lt[2] - dk[2]), dk, lt };
+        }
+
+        // ★サブモジュールのずれを、上の物差しを最大化する向きに直す。
+        //   第2PQRは実画像のファインダーを探して格子を組む（fpRank/alignFixed が付く）ため
+        //   ずれないが、第1PQRは第1QRの location から組むしかなく、そこがずれると
+        //   誰も気づけないまま彩度だけで決まるプレーンが全滅する。
+        function fitNewColorGridOffset(src, width, height, locationInfo, n, radius) {
+            const m0 = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, 0, 0);
+            const base = m0.dist;
+            const out = { dx: 0, dy: 0, dist: base, base, searched: 0, dk: m0.dk, lt: m0.lt };
+            // ★アンカーが十分離れていても、さらに離れる向きがあれば必ずそちらが正しい。
+            //   合成実測: 0.25モジュールずれは base=229 と一見良好だが曖昧セルは 344/841。
+            //   補正すると 5/841 まで落ちるので、良好に見える回も細かく詰める。
+            // ★±0.5は探さない。QRツインの2枚は 8.5モジュール（＝半モジュール）ずれて刷られるので、
+            //   ちょうど半モジュール動かすと「もう一方のシンボルの格子」に乗ってしまう。
+            //   そこでも機能パターンが部分的に噛み合うため、分離度だけ見ると偽の極大になる。
+            //   実測（4色×4色, 試行#3）: @0.5,-0.5 で dist=174 まで上がったのに、
+            //   較正結果は bla:159/72/47 / red:42/28/24 と黒と赤が入れ替わり、
+            //   曖昧セルは 573/1369(41.9%) へ悪化していた。
+            const STEPS = [0, -0.25, 0.25, -0.125, 0.125];
+            for (const dy of STEPS) {
+                for (const dx of STEPS) {
+                    if (dx === 0 && dy === 0) continue;
+                    out.searched++;
+                    const m = measureNewColorAnchorSeparation(src, width, height, locationInfo, n, radius, dx, dy);
+                    if (m.dist > out.dist) {
+                        out.dist = m.dist;
+                        out.dx = dx;
+                        out.dy = dy;
+                        out.dk = m.dk;
+                        out.lt = m.lt;
+                    }
+                }
+            }
+            return out;
+        }
+
         function sampleNewColorDisplayStatesFromLocation(src, width, height, locationInfo, decoder, colorProbe = null) {
             if (!src || !locationInfo || !locationInfo.mappingFunction || !decoder || !decoder.candidates) return null;
             const n = locationInfo.dimension || 0;
             if (n < 21 || ((n - 17) % 4) !== 0) return null;
             const moduleSize = Math.max(1, locationInfo.moduleSize || 1);
             const radius = Math.max(1, Math.round(moduleSize * 0.16));
+            // ★格子の自己検査とサブモジュール補正。合わない格子で分類しても
+            //   必ず失敗するうえ、1試行あたり900回以上のjsQR再試行を空回りさせる。
+            const gridFit = fitNewColorGridOffset(src, width, height, locationInfo, n, radius);
+            if (colorProbe) colorProbe.gridFit = gridFit;
+            if (gridFit.dist < NEW_COLOR_GRID_MIN_ANCHOR_DIST) {
+                if (colorProbe) colorProbe.gridRejected = true;
+                return null;
+            }
+            const gridOffX = gridFit.dx;
+            const gridOffY = gridFit.dy;
             const probeOffsets = [
                 { dx: 0, dy: 0, weight: 3 },
                 { dx: -0.18, dy: 0, weight: 1 },
@@ -9065,7 +9465,7 @@
                     chG.length = 0;
                     chB.length = 0;
                     for (const probe of probeOffsets) {
-                        const p = locationInfo.mappingFunction(c + 0.5 + probe.dx, r + 0.5 + probe.dy);
+                        const p = locationInfo.mappingFunction(c + 0.5 + gridOffX + probe.dx, r + 0.5 + gridOffY + probe.dy);
                         if (!p || p.x < 0 || p.y < 0 || p.x >= width || p.y >= height) continue;
                         const rgb = averageRgbSample(src, width, height, p.x, p.y, radius);
                         if (!samples) samples = [];
@@ -9178,6 +9578,9 @@
                 if (colorProbe.summary) {
                     const calibParts = [];
                     if (calibration) calibParts.push(calibration.calibDebug);
+                    // ★較正できなかった回もログに残す（従来は calib 行ごと消えていた）
+                    else calibParts.push('ng=' + (newColorCalibLastReject || '-')
+                        + (newColorCalibAnchorDebug ? ' ' + newColorCalibAnchorDebug : ''));
                     if (axisClassifier) calibParts.push(axisClassifier.debug + ` dis=${altDisagreeCount}`);
                     if (calibParts.length) colorProbe.summary.calib = calibParts.join(' ');
                     // ★ プレーン別分離度（群分離/minペア距離）: どの領域ビットの色コントラストが
@@ -9342,8 +9745,31 @@
             for (const plan of targetPlanList) {
                 if (hasNewColorRegionAcquired(result, q1Data.mgmtInfo, plan.regionNo)) acquiredBefore++;
             }
+            // ★第1PQRを狙う回は、位置探索そのものが不要。
+            //   第1QRは色分離の前に白黒として復号できており、jsQR がそのとき使った
+            //   格子（ファインダー中心3つ＋位置合わせパターン）がそのまま第1PQRの格子になる。
+            //   実機ログでは、この回の位置探索は毎回空振り（no_locator）しながら
+            //   1試行あたり3.4〜5.9秒を使い、そのうえ候補が1件も残らないため
+            //   専用クロップで何も分類できずに終わっていた。
+            //   探索をやめて第1QRの格子を直接使えば、確実に・速く分類できる。
+            const pqr1Seed = aimPqr1 ? buildLocInfoFromKnownCorners(
+                q1LocalData.location,
+                (typeof q1Data.version === 'number' && q1Data.version > 0)
+                    ? q1Data.version
+                    : ((q1Data.version && q1Data.version.versionNumber) || q1Data.versionNumber || null)
+            ) : null;
+            // ★第1PQRの種は「復号済みの第1QRから作った格子」なので、でたらめな候補ではない。
+            //   従来は9割が画像内に入っていないと捨てていたが、そうすると唯一の候補が
+            //   消えて何も試せずに終わる（実機ログ: 種:画像外 が毎フレーム60回）。
+            //   実際に重なっている範囲があるなら使い、割合はプローブに残す。
+            const pqr1SeedRatio = pqr1Seed ? locInfoInsideRatio(pqr1Seed, width, height) : 0;
+            const usePqr1SeedOnly = !!(pqr1Seed && pqr1SeedRatio >= 0.35);
             let colorLocations = [];
-            if (skipLocate) {
+            if (usePqr1SeedOnly) {
+                recordJsQrInput('newColor pqr1-seed', locateImageType);
+                pqr1Seed.seedFallback = false;
+                colorLocations = [pqr1Seed];
+            } else if (skipLocate) {
                 recordJsQrInput('newColor locate-skip', locateImageType);
             } else {
                 recordJsQrInput('newColor color-locate', locateImageType);
@@ -9383,8 +9809,10 @@
                     .map(item => item.loc);
             }
             // 位置特定が取れているか（Stage3のBD間引き判断に使う）
-            if (colorLocations.length) newColorLocateMissStreak = 0;
-            else newColorLocateMissStreak++;
+            if (!usePqr1SeedOnly) {
+                if (colorLocations.length) newColorLocateMissStreak = 0;
+                else newColorLocateMissStreak++;
+            }
 
             // ★ 直近の取得実績がある位置情報を先頭で試す（同一クロップのStage3反復では
             //   1候補目の分類で決まりやすくなり、予算内で本命に確実に到達する）
@@ -9400,16 +9828,40 @@
             //     約3倍だった（種25/841 に対し locate 候補8/841）。四隅だけの写像では
             //     アライメントパターンによる歪み補正が効かないためで、先頭に置くと
             //     毎フレーム総当たりして時間予算を食い潰す（成功時の平均が 2.7秒→9.4秒に悪化）。
-            if (aimPqr1) {
-                const seed = buildLocInfoFromKnownCorners(
-                    q1LocalData.location,
-                    q1Data.version || q1Data.versionNumber || null
-                );
+            let seedNote = usePqr1SeedOnly
+                ? ('種:単独使用 画像内' + Math.round(pqr1SeedRatio * 100) + '%')
+                : (aimPqr1 ? ('種:未作成 画像内' + Math.round(pqr1SeedRatio * 100) + '% 範囲=' + locInfoRangeText(pqr1Seed))
+                           : '種:対象外');
+            if (aimPqr1 && !usePqr1SeedOnly) {
+                const seedVer = (typeof q1Data.version === 'number' && q1Data.version > 0)
+                    ? q1Data.version
+                    : ((q1Data.version && q1Data.version.versionNumber)
+                        || q1Data.versionNumber || null);
+                const seed = buildLocInfoFromKnownCorners(q1LocalData.location, seedVer);
+                const ratio = seed ? locInfoInsideRatio(seed, width, height) : 0;
+                seedNote = !seedVer ? ('種:型番なし(' + JSON.stringify(q1Data.version) + ')')
+                    : (!seed ? '種:格子を作れず'
+                        : ('種:画像内' + Math.round(ratio * 100) + '% 範囲=' + locInfoRangeText(seed)));
                 // 画像外を指す種は分類しても白セルばかりで無意味（実測: 841中667〜783が白）
                 if (seed && isLocInfoMostlyInside(seed, width, height)) {
-                    seed.seedFallback = true;   // 常に後回し扱いにする印
-                    colorLocations.push(seed);
+                    if (seed.probeMeta && seed.probeMeta.seedFromFinders) {
+                        // ★ファインダー中心＋位置合わせパターンから組んだ種は、
+                        //   第1QRの復号に実際に使われた格子そのもの。上の但し書きは
+                        //   四隅だけから組んでいた頃の話なので、こちらは先頭で試す。
+                        //   第1PQRを狙う回は locate がほぼ空振りする（実機ログ: no_locator 66〜76回）ため、
+                        //   これが唯一のまともな候補になる。
+                        seed.seedFallback = false;
+                        colorLocations.unshift(seed);
+                    } else {
+                        seed.seedFallback = true;   // 四隅だけの粗い種は常に後回し
+                        colorLocations.push(seed);
+                    }
                 }
+            }
+
+            if (!colorLocations.length) {
+                recordNewColorNoCandidate('pqr' + (targetPqrNo || '?') + ' ' + width + 'x' + height
+                    + ' 位置特定0件 / ' + seedNote);
             }
 
             const regionDecodeOptions = (regionNo, locInfo) => {
@@ -9452,6 +9904,26 @@
             const attemptCandidateDecode = (cand) => {
                 const locInfo = cand.locInfo;
                 const colorProbe = cand.colorProbe;
+                // ★白黒シンボル（QRツインの第1PQR）を色シンボルとして分類してしまった候補は、
+                //   どのプレーンも復号できないので即座に捨てる。
+                //   実機ログでは、この候補が毎フレーム全プレーンぶんの復号を空振りしていた。
+                //   黒白しか無いと較正が黒白アンカーだけで組み上がり、曖昧セル0・マージン80超の
+                //   「良い候補」に見えてしまうため、候補の並べ替えでも先頭に来て時間を食う。
+                if (cand.states && cand.states.length) {
+                    const seen = new Set();
+                    for (const row of cand.states) {
+                        for (const st of row) {
+                            seen.add(st);
+                            if (seen.size > 2) break;
+                        }
+                        if (seen.size > 2) break;
+                    }
+                    if (seen.size <= 2 && newColorDecoderPlaneCount(decoder) >= 2) {
+                        colorProbe.regions.mono = 'mono_symbol';
+                        if (colorProbe.summary) recordNewColorColorProbe(colorProbe);
+                        return false;
+                    }
+                }
                 // ★Ver3.1：領域番号とプレーン番号の対応を構造から導く。
                 //   従来は bitIndex = regionNo - 2 の固定式で、
                 //   第1PQRも色を持つ構成では割り当てがずれていた。
@@ -9624,7 +10096,12 @@
                     moduleSize: locInfo && locInfo.moduleSize,
                     regionCount: q1Data.mgmtInfo.regionCount,
                     targetPqrNo: targetPqrNo || null,
+                    // ★どの工程の画像で分類したのかを見分けるために入力の大きさを残す。
+                    //   これが無いと、専用クロップと縮小全画面のどちらの結果か判別できない。
+                    imgW: width,
+                    imgH: height,
                     seedFallback: !!(locInfo && locInfo.seedFallback),
+                    seedFromFinders: !!(locInfo && locInfo.probeMeta && locInfo.probeMeta.seedFromFinders),
                     planList: targetPlanList,
                     regions: {}
                 };
@@ -9639,7 +10116,19 @@
                     colorProbe.supersampleCrop = supersampled.crop;
                 }
                 const sampledStates = sampleNewColorDisplayStatesFromLocation(sampleSrc, sampleWidth, sampleHeight, sampleLocationInfo, decoder, colorProbe);
-                if (!sampledStates) continue;
+                if (!sampledStates) {
+                    // ★格子がシンボルに乗っていないと判定した回もログに残す。
+                    //   黙って continue すると、何も試していないのに痕跡が消える。
+                    if (colorProbe && colorProbe.gridRejected) {
+                        const f = colorProbe.gridFit || {};
+                        recordNewColorNoCandidate('pqr' + (colorProbe.targetPqrNo || '?')
+                            + ' ' + (colorProbe.imgW || '?') + 'x' + (colorProbe.imgH || '?')
+                            + ' 格子がシンボルに乗っていない(アンカー距離 ' + Math.round(f.base || 0)
+                            + (f.searched ? '→補正しても ' + Math.round(f.dist || 0) : '') + ')'
+                            + (colorProbe.seedFromFinders ? ' 種=fp' : ''));
+                    }
+                    continue;
+                }
                 const cells = colorProbe._cells || null;
                 const altStates = colorProbe._altStates || null;
                 const centroids = colorProbe._centroids || null;
@@ -9718,7 +10207,10 @@
             }
             let acc = existingResult;
             let out = null;
+            // ★特定のPQRだけを対象にする（第1PQR専用の切り出しで使う）
+            const onlyPqrNo = coordinateOptions && coordinateOptions.onlyPqrNo;
             for (const t of targets) {
+                if (onlyPqrNo && t.pqrNo !== onlyPqrNo) continue;
                 if (!t.regions || !t.regions.length) continue;
                 // このPQRの領域が既に揃っているなら locate ごと省略する
                 if (acc && t.regions.every(p => hasNewColorRegionAcquired(acc, mgmt, p.regionNo))) continue;
@@ -10682,7 +11174,15 @@
                         if (fullScanFrameIdx % 3 === 0) heavyScales.push(960);
                         else if (fullScanFrameIdx % 3 === 1) heavyScales.push(720);
                         if (maxDim > 0 && fullScanFrameIdx % 9 === 5) heavyScales.push(maxDim);
-                        const q2Stage3Profile = buildQ2ProfileForStage3();
+                        let q2Stage3Profile = buildQ2ProfileForStage3();
+                        // ★第1PQRも色を持つ構成（4色＋4色 など）は、第1QRの位置が古いと
+                        //   その格子で色を読むことになる。毎フレーム取り直してから組み直す。
+                        if (q2Stage3Profile && q2Stage3Profile.kind === 'newcolor'
+                            && newColorNeedsPqr1Separation(q2Stage3Profile.newColorMgmtInfo)) {
+                            if (refreshFirstQrGeometryForNewColor(720)) {
+                                q2Stage3Profile = buildQ2ProfileForStage3();
+                            }
+                        }
                         // newColor(3/4領域): 全画面カラー分類は高コストで成功実績ゼロのまま
                         // （実測ログでも全fail、成功はすべて F0/F0.5/F1 クロップ入力の
                         // matrix-located）。位置喪失時の保険として 1/6 フレームまで間引き、
